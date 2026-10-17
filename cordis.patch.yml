@@ -1,0 +1,4 @@
+- insert:
+    - id: my-model
+      name: '@local/dsh-my-model'
+      config: {}

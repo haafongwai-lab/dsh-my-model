@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="My Model">
+  <defs>
+    <linearGradient id="mm-bg" x1="8" y1="6" x2="58" y2="60" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2f7cf6"/>
+      <stop offset="1" stop-color="#13b8a6"/>
+    </linearGradient>
+    <linearGradient id="mm-spark" x1="40" y1="14" x2="54" y2="30" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".98"/>
+      <stop offset="1" stop-color="#dff8ff" stop-opacity=".8"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#mm-bg)"/>
+  <path d="M18 20.5h28a6 6 0 0 1 6 6v12a6 6 0 0 1-6 6H33.5l-8.2 6v-6H18a6 6 0 0 1-6-6v-12a6 6 0 0 1 6-6Z" fill="#fff" fill-opacity=".16" stroke="#fff" stroke-width="2.2" stroke-linejoin="round"/>
+  <circle cx="24" cy="32.5" r="2.1" fill="#fff"/>
+  <circle cx="32" cy="32.5" r="2.1" fill="#fff"/>
+  <circle cx="40" cy="32.5" r="2.1" fill="#fff"/>
+  <path d="M47.5 10.5l1.6 4.1 4.1 1.6-4.1 1.6-1.6 4.1-1.6-4.1-4.1-1.6 4.1-1.6 1.6-4.1Z" fill="url(#mm-spark)"/>
+</svg>
