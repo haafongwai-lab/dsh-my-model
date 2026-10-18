@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-my-model",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "private": true,
   "type": "module",
   "description": "My Model: a DeepSeek web-account model provider for DeepSeek Harness.",
@@ -10,7 +10,6 @@
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
-    "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
   "files": [
@@ -21,10 +20,12 @@
     "pow.js",
     "sha3_wasm_bg.wasm",
     "cordis.patch.yml",
-    "locale/*.json",
     "icon.svg",
     "README.md"
   ],
+  "engines": {
+    "node": ">=20.3.0"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

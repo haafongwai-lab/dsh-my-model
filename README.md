@@ -31,9 +31,11 @@ open **Settings → My Model / 我的模型**.
 5. Click **Test connection**. A success means the token was accepted and the
    proof-of-work challenge was solved locally (no chat message is sent).
 
-If the upstream responds with a human-verification challenge (AWS WAF or
-Cloudflare), paste the site's cookie string into the optional **Cookie** field
-and retry. The client also keeps `Set-Cookie` values it receives while running.
+If the upstream responds with a human-verification challenge (AWS WAF,
+Cloudflare, or Huawei Cloud WAF) — including one served as HTTP 200 with an HTML
+body — paste the site's cookie string into the optional **Cookie** field and
+retry. Huawei challenges are recognised by `Server: CW`, `HWWAF*` markers, and
+the usual verification copy (人机验证 / 验证码 / 请完成验证). The client also keeps `Set-Cookie` values it receives while running.
 
 ## Models
 
@@ -64,6 +66,9 @@ way instead of firing every Harness request at it:
   jittered exponential cooldown and honors `Retry-After`. Waits shorter than
   `maxAutoWaitMs` happen inside the turn; longer ones fail with a `RATE_LIMIT`
   retry hint so the Harness schedules the next attempt instead of hammering.
+- **PoW retry.** A rejected proof-of-work challenge is re-solved once
+  automatically (a challenge can expire between fetch and use), instead of
+  failing the turn.
 - **Terminal classification.** Quota exhaustion (`QUOTA`) and a muted account
   (`ACCOUNT_MUTED`) are reported separately and are not retried.
 - **No duplicate output.** A failure after the first streamed chunk is a
@@ -74,12 +79,12 @@ These options shape that behavior (all optional):
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `maxConcurrentTurns` | `1` | Maximum generations in flight for the account. |
-| `minTurnGapMs` | `1200` | Minimum gap between turn starts. |
+| `minTurnGapMs` | `3000` | Minimum gap between turn starts. |
 | `maxAutoWaitMs` | `20000` | Longest cooldown the plugin waits inside a turn. |
 | `cooldownBaseMs` | `15000` | First cooldown after a rate limit. |
 | `maxCooldownMs` | `120000` | Cooldown cap. |
 
-`clientVersion` (default `2.4.0`) sets the `x-client-version` header and should
+`clientVersion` (default `2.5.0`) sets the `x-client-version` header and should
 track the deployed web client; a stale value is more likely to be flagged by
 upstream risk control.
 
@@ -96,6 +101,12 @@ truncated closing tag, and turns them into Harness `tool-call` blocks. Tool
 calls depend on the model following the protocol; unrecoverable fragments are
 cleaned out of the visible answer.
 
+Each tool result is truncated to `maxToolChars` (default `8000`) and common
+credential shapes (`sk-…`, `Bearer …`, `api_key=…`, `password=…`, `token=…`) are
+redacted before it is replayed. File paths are preserved because the model needs
+them to act. Lower `maxToolChars` if large command outputs should not dominate a
+turn.
+
 ## Config
 
 The bundle patch writes `config: {}`. Every field is optional:
@@ -105,12 +116,13 @@ The bundle patch writes `config: {}`. Every field is optional:
   name: '@local/dsh-my-model'
   config:
     baseURL: https://chat.deepseek.com
-    clientVersion: 2.4.0
+    clientVersion: 2.5.0
     tokenEnv: DEEPSEEK_WEB_TOKEN
     cookiesEnv: DEEPSEEK_WEB_COOKIES
     timeoutMs: 300000
     maxPromptChars: 1000000
-    minTurnGapMs: 1200
+    maxToolChars: 8000
+    minTurnGapMs: 3000
     maxConcurrentTurns: 1
     maxAutoWaitMs: 20000
     cooldownBaseMs: 15000
@@ -125,6 +137,67 @@ rejected by the upstream.
 
 The token and cookie are stored through the Harness credential service under
 `tokenEnv` / `cookiesEnv`; they are not written into `cordis.patch.yml`.
+
+### Detection-avoidance options (方案A)
+
+The web endpoint is a consumer product with anti-bot risk control. When it is
+driven from an automated agent (for example, to control the computer), the
+account can be **muted** (`ACCOUNT_MUTED`, a terminal state — not retried). The
+options below reduce how much the traffic looks like a non-browser bot. They
+lower the probability of a mute but do **not** guarantee it; the durable fix is
+to use the official DeepSeek API or a local model for agent workloads.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `userAgent` | *(browser default)* | `User-Agent`. Match the browser that issued the login token. |
+| `secChUa` | *(browser default)* | `sec-ch-ua` client hint. Match the live web client. |
+| `secChUaPlatform` | `"Windows"` | `sec-ch-ua-platform` client hint. Match your OS. |
+| `secChUaMobile` | `?0` | `sec-ch-ua-mobile` client hint. |
+| `acceptLanguage` | `zh-CN,zh;q=0.9` | `Accept-Language`. Match the browser. |
+| `clientLocale` | `zh_CN` | `x-client-locale`. |
+| `clientPlatform` | `web` | `x-client-platform`. |
+| `clientBundleId` | `com.deepseek.chat` | `x-client-bundle-id`. |
+| `secFetchSite` | `same-origin` | `sec-fetch-site`, captured from a real same-origin fetch. |
+| `secFetchMode` | `cors` | `sec-fetch-mode`. |
+| `secFetchDest` | `empty` | `sec-fetch-dest`. |
+| `priority` | `u=1, i` | `priority`. |
+| `referer` | `https://chat.deepseek.com/a/chat/` | `Referer`. |
+| `humanizePacing` | `true` | Jitter the inter-turn gap and insert occasional idle pauses. |
+| `turnGapJitter` | `0.6` | Inter-turn gap jitter ratio (`0` = strict `minTurnGapMs`). |
+| `humanLongPauseChance` | `0.25` | Probability of a longer idle before a turn. |
+| `humanLongPauseMinMs` | `5000` | Lower bound of that idle. |
+| `humanLongPauseMaxMs` | `20000` | Upper bound of that idle. |
+
+These can also be set from **Settings → My Model → Browser fingerprint**. That
+editor persists the values to `<profile>/.my-model.json` (merged over the loader
+config on the next boot) and applies them to the live client immediately. Leave
+a field blank to fall back to the built-in default. The file is per profile, so
+each profile keeps its own fingerprint.
+
+Operational rules that code cannot enforce:
+
+- **Run the harness on the same machine and network as the browser that issued
+  the token.** A datacenter proxy/VPN plus a reused token is the strongest mute
+  trigger (it looks like credential abuse).
+- **Keep `clientVersion` in sync with the deployed web client** — still the most
+  important fingerprint field. The built-in defaults are a snapshot measured on
+  this machine (Chrome 155 / web client 2.5.0); they still go stale as the
+  browser and web client update. With no settings-page overrides, the adapter
+  logs a startup reminder.
+- Use a dedicated account, not your main, and rotate if one gets muted.
+- The system prompt no longer announces the tool protocol; do not re-add phrases
+  such as "function-calling field" or "OpenAI-style".
+
+## Logs
+
+The desktop app does not persist the host's stdout, so the plugin appends its
+own warnings and errors to `<profile>/my-model.log` (rotated to `.1` at 1 MB).
+For the `desktop` profile that is
+`~/.dsh/profiles/desktop/my-model.log`. It records rate limits, WAF challenges,
+PoW retries, fingerprint warnings, and terminal failures (`terminal failure
+ACCOUNT_MUTED`, `terminal failure WAF_CHALLENGE`, `terminal failure QUOTA`, …),
+and the same messages still go to the host logger when one is attached. Open it in any editor, or watch it with
+`tail -f` (Git Bash) / `Get-Content -Wait` (PowerShell).
 
 ## Files
 

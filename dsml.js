@@ -273,14 +273,29 @@ function truncate(text, limit) {
 }
 
 /**
+ * Redact common credential shapes from a tool result before it is replayed to
+ * the web model. Paths are left intact because the model needs them to act.
+ */
+function redactSecrets(text) {
+  return String(text ?? '')
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, 'sk-***')
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi, '$1***')
+    .replace(/(\b(?:api[_-]?key|apikey|password|passwd|secret|token)\s*[:=]\s*["']?)([^\s"']{6,})/gi, '$1***')
+}
+
+function sanitizeToolResult(text, limit) {
+  return truncate(redactSecrets(text), limit)
+}
+
+/**
  * Build the system-side tool protocol block for one request.
  * @param {Array<{name:string,description?:string,parameters?:object}>} tools
  */
 export function buildDsmlToolPrompt(tools) {
   if (!Array.isArray(tools) || tools.length === 0) return ''
   const lines = [
-    'You have access to tools, but this chat endpoint exposes no native function-calling field.',
-    'When you need a tool, respond with EXACTLY this text format (no markdown fence, no text before or after the opening tag):',
+    'Sometimes you need to take an action — open a page, run a check, read a file, and so on.',
+    'To request an action, put a short structured block at the end of your reply, then stop:',
     '',
     '<|DSML|tool_calls>',
     '  <|DSML|invoke name="TOOL_NAME">',
@@ -288,18 +303,18 @@ export function buildDsmlToolPrompt(tools) {
     '  </|DSML|invoke>',
     '</|DSML|tool_calls>',
     '',
-    'Rules:',
-    '- Start the opening tag with a literal "<" — never omit it.',
-    '- One <|DSML|tool_calls> wrapper may contain one or more <|DSML|invoke> entries.',
-    '- Put the exact tool name in the invoke `name` attribute.',
-    '- String values MUST use <![CDATA[...]]>; numbers, booleans and null stay plain text.',
-    '- Always close CDATA with "]]>" (two brackets, then a greater-than).',
-    '- Object/array arguments may be one JSON value inside CDATA.',
-    '- Do not emit OpenAI-style JSON tool calls, explanations, or markdown fences.',
-    '- After a tool call, stop and wait for the tool result; never invent one.',
-    '- If no tool is needed, answer normally without any DSML tags.',
+    'How to write it:',
+    '- Begin the block with a literal "<" — do not quote it or describe it in words.',
+    '- Put one or more requests inside a single <|DSML|tool_calls> block.',
+    '- Write the exact action name in the invoke `name` attribute.',
+    '- For text, wrap the value in <![CDATA[...]]>; numbers, true/false and null stay plain.',
+    '- Always close CDATA with "]]>".',
+    '- An object or a list value can be written as one JSON value inside CDATA.',
+    '- Do not add explanation, markdown, or anything else around the block.',
+    '- After the block, wait for the result before continuing; never guess the outcome.',
+    '- If no action is needed, just reply normally with no block.',
     '',
-    'Available tools:',
+    'Actions you can request:',
   ]
   for (const tool of tools.slice(0, 48)) {
     const name = String(tool?.name ?? '').trim()
@@ -349,11 +364,11 @@ function messageText(message) {
  * @param {number} [input.maxChars] - hard cap on the whole prompt.
  * @returns {string}
  */
-export function buildTranscriptPrompt({ system, messages, tools, maxChars = 1_000_000 }) {
+export function buildTranscriptPrompt({ system, messages, tools, maxChars = 1_000_000, maxToolChars = 8000 }) {
   const systemParts = []
   if (system && String(system).trim()) systemParts.push(`System:\n${String(system).trim()}`)
   const toolPrompt = buildDsmlToolPrompt(tools)
-  if (toolPrompt) systemParts.push(`System (tool protocol):\n${toolPrompt}`)
+  if (toolPrompt) systemParts.push(toolPrompt)
 
   const conversation = []
   for (const message of Array.isArray(messages) ? messages : []) {
@@ -377,7 +392,7 @@ export function buildTranscriptPrompt({ system, messages, tools, maxChars = 1_00
       const text = messageText(message)
       const id = message.toolCallId ?? message.source?.callId ?? 'unknown'
       const status = message.isError ? ' (ERROR)' : ''
-      conversation.push(`Tool result (call_id=${id})${status}:\n${truncate(text, 24000)}`)
+      conversation.push(`Tool result (call_id=${id})${status}:\n${sanitizeToolResult(text, maxToolChars)}`)
       continue
     }
     if (message.role === 'assistant') {

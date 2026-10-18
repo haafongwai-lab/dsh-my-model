@@ -116,10 +116,27 @@ const prompt = buildTranscriptPrompt({
     },
   ],
 })
-assert.match(prompt, /Available tools:/)
+assert.match(prompt, /Actions you can request:/)
 assert.match(prompt, /Tool result \(call_id=call1\):/)
 assert.match(prompt, /<\|DSML\|tool_calls>/)
 assert.match(prompt, /file body/)
+
+// Tool results are truncated and secret-redacted before replay.
+const secretPrompt = buildTranscriptPrompt({
+  messages: [
+    { role: 'user', content: [{ type: 'text', text: 'run' }] },
+    {
+      role: 'tool',
+      toolCallId: 'call2',
+      content: [{ type: 'text', text: `api_key=supersecretvalue123\n${'x'.repeat(5000)}` }],
+    },
+  ],
+  tools: [],
+  maxToolChars: 1000,
+})
+assert.doesNotMatch(secretPrompt, /supersecretvalue123/)
+assert.match(secretPrompt, /api_key=\*\*\*/)
+assert.ok(secretPrompt.length < 2000, 'tool result is truncated')
 
 assert.equal(deltaPrompt('User: a', 'User: a\n\nUser: b'), 'User: b')
 assert.equal(deltaPrompt('User: a', 'User: a'), 'User: a')

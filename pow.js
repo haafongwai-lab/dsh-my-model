@@ -76,6 +76,13 @@ async function loadWasm() {
       const bytes = readFileSync(path)
       const { instance } = await WebAssembly.instantiate(bytes, { wbg: {} })
       wasm = instance.exports
+      // The solver relies on these wasm exports by name/index; fail with a
+      // clear message if a rebuilt module ever changes them.
+      const required = ['wasm_solve', '__wbindgen_add_to_stack_pointer', '__wbindgen_export_0', '__wbindgen_export_2']
+      const missing = required.filter((name) => typeof wasm[name] !== 'function')
+      if (missing.length > 0) {
+        throw new Error(`sha3_wasm_bg.wasm is incompatible: missing exports ${missing.join(', ')}`)
+      }
       memoryView = null
       dataView = null
       refreshViews()

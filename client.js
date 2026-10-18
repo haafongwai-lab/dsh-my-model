@@ -34,12 +34,30 @@ window.__ModuleLoader__.load({
       'help.step4': '回到这里粘贴并保存。Token 只保存在本机凭据库，不会写进配置文件。',
       'models.title': '可用模型',
       'models.note': '在对话输入框的模型选择器里选择它们；各模型的差异见上方描述。',
+      'models.currentDefault': '当前默认',
+      'models.setDefault': '设为默认',
+      'fingerprint.title': '浏览器指纹（高级）',
+      'fingerprint.desc': '与登录 chat.deepseek.com 的浏览器保持一致，可降低被风控的概率；留空表示使用内置默认值。',
+      'fingerprint.overridden': '已自定义',
+      'fingerprint.defaultTag': '默认值',
+      'fingerprint.userAgent': 'User-Agent',
+      'fingerprint.secChUa': 'sec-ch-ua',
+      'fingerprint.secChUaPlatform': 'sec-ch-ua-platform',
+      'fingerprint.secChUaMobile': 'sec-ch-ua-mobile',
+      'fingerprint.acceptLanguage': 'Accept-Language',
+      'fingerprint.clientVersion': '客户端版本 (x-client-version)',
+      'fingerprint.save': '保存指纹',
+      'fingerprint.reset': '恢复默认',
+      'fingerprint.saved': '指纹已保存并即时生效。',
+      'fingerprint.resetDone': '已恢复默认指纹。',
+      'fingerprint.unavailable': '当前无法定位 profile 目录，指纹无法持久化；请直接编辑插件配置。',
       'models.unavailable': '当前未注册（插件配置可能未生效）',
       'models.empty': '当前没有可用模型。',
       notice: '这不是 DeepSeek 官方 API。它使用网页版登录态和网页版配额，受 DeepSeek 服务条款约束；接口变化或风控可能导致失效。请勿分享 Token。',
       'message.saved': '已保存。',
       'message.tested': '连接成功，Token 有效。',
       'message.cleared': '已清除保存的 Token 和 Cookie。',
+      'message.defaultSet': '已设为默认模型。',
       'message.cookieCleared': '已清除保存的 Cookie。',
       'message.loadFailed': '无法读取插件状态。',
       'message.nothingToSave': '没有需要保存的内容。',
@@ -80,12 +98,30 @@ window.__ModuleLoader__.load({
       'help.step4': 'Paste it here and save. The token stays in the local credential store, never in a config file.',
       'models.title': 'Available models',
       'models.note': 'Pick one in the composer model selector; each model’s behaviour is described above.',
+      'models.currentDefault': 'Current default',
+      'models.setDefault': 'Set as default',
+      'fingerprint.title': 'Browser fingerprint (advanced)',
+      'fingerprint.desc': 'Match the browser that signed in to chat.deepseek.com to reduce risk-control flags; leave blank to use the built-in defaults.',
+      'fingerprint.overridden': 'Customized',
+      'fingerprint.defaultTag': 'Defaults',
+      'fingerprint.userAgent': 'User-Agent',
+      'fingerprint.secChUa': 'sec-ch-ua',
+      'fingerprint.secChUaPlatform': 'sec-ch-ua-platform',
+      'fingerprint.secChUaMobile': 'sec-ch-ua-mobile',
+      'fingerprint.acceptLanguage': 'Accept-Language',
+      'fingerprint.clientVersion': 'Client version (x-client-version)',
+      'fingerprint.save': 'Save fingerprint',
+      'fingerprint.reset': 'Reset to defaults',
+      'fingerprint.saved': 'Fingerprint saved and applied immediately.',
+      'fingerprint.resetDone': 'Fingerprint reset to defaults.',
+      'fingerprint.unavailable': 'The profile directory could not be located, so the fingerprint cannot be persisted; edit the plugin config instead.',
       'models.unavailable': 'Not registered right now (the plugin configuration may not be active)',
       'models.empty': 'No models are available right now.',
       notice: 'This is not the official DeepSeek API. It uses your web login and web quota, subject to DeepSeek’s terms; upstream changes or anti-bot checks can break it. Never share your token.',
       'message.saved': 'Saved.',
       'message.tested': 'Connected — the token works.',
       'message.cleared': 'Stored token and cookie cleared.',
+      'message.defaultSet': 'Set as the default model.',
       'message.cookieCleared': 'Stored cookie cleared.',
       'message.loadFailed': 'Could not read the plugin status.',
       'message.nothingToSave': 'There is nothing to save.',
@@ -126,24 +162,43 @@ window.__ModuleLoader__.load({
 .dsh-mm-textarea::placeholder{color:var(--dsw-alias-label-dimmed)}
 .dsh-mm-textarea:focus{border-color:var(--dsw-alias-brand-primary);outline:none}
 .dsh-mm-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.dsh-mm-button{box-sizing:border-box;align-items:center;background:0 0;border:1px solid var(--dsw-alias-border-l2);border-radius:18px;color:var(--dsw-alias-label-primary);cursor:pointer;display:inline-flex;font:inherit;font-size:14px;gap:4px;height:36px;justify-content:center;line-height:22px;padding:0 14px}
-.dsh-mm-button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-solid)}
-.dsh-mm-button.primary{background:var(--dsw-alias-button-primary-fill);border-color:transparent;color:var(--dsw-alias-label-primary-foreground)}
-.dsh-mm-button.primary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}
-.dsh-mm-button.danger{border-color:transparent;color:var(--dsw-alias-state-error-primary)}
-.dsh-mm-button.danger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-danger)}
+/* One control system for every button on the page. The shared base fixes the
+   box model, kills inherited transforms/filters/animation, and limits motion to
+   colour only — so no state can ever resize or nudge a control. */
+.dsh-mm-button,.dsh-mm-link{-webkit-appearance:none;appearance:none;box-sizing:border-box;margin:0;border:1px solid transparent;background-color:transparent;background-image:none;color:var(--dsw-alias-label-primary);font:inherit;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;text-align:center;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;transform:none;filter:none;animation:none;will-change:auto;transition:background-color .12s ease,border-color .12s ease,color .12s ease,opacity .12s ease}
+.dsh-mm-button{height:36px;padding:0 16px;border-radius:18px;border-color:var(--dsw-alias-border-l2);gap:6px;font-size:14px;font-weight:500;line-height:20px}
+.dsh-mm-button:hover:not(:disabled){background-color:var(--dsw-alias-interactive-bg-hover-solid)}
+.dsh-mm-button:active:not(:disabled){background-color:var(--dsw-alias-interactive-bg-hover-solid)}
+.dsh-mm-button.primary{background-color:var(--dsw-alias-button-primary-fill);border-color:transparent;color:var(--dsw-alias-label-primary-foreground)}
+.dsh-mm-button.primary:hover:not(:disabled),.dsh-mm-button.primary:active:not(:disabled){background-color:var(--dsw-alias-button-primary-hover)}
+.dsh-mm-button.danger{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-state-error-primary)}
+.dsh-mm-button.danger:hover:not(:disabled),.dsh-mm-button.danger:active:not(:disabled){background-color:var(--dsw-alias-interactive-bg-hover-danger)}
 .dsh-mm-button:disabled{cursor:default;opacity:.4}
-.dsh-mm-button:focus-visible{box-shadow:0 0 0 2px var(--dsw-alias-border-l3);outline:none}
-.dsh-mm-link{background:0 0;border:none;border-radius:6px;color:var(--dsw-alias-label-tertiary);cursor:pointer;font:inherit;font-size:12px;line-height:18px;padding:2px 4px}
-.dsh-mm-link:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
+.dsh-mm-link{height:24px;padding:0 8px;border-radius:6px;gap:4px;color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:500;line-height:18px}
+.dsh-mm-link:hover:not(:disabled){background-color:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
 .dsh-mm-link:disabled{cursor:default;opacity:.4}
+.dsh-mm-button:focus-visible,.dsh-mm-link:focus-visible,.dsh-mm-summary:focus-visible{box-shadow:none;outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
+/* Defence in depth: host stylesheets sometimes attach a lift/filter/animation
+   to every interactive element. Re-assert the neutral state on every pseudo
+   class so a hover can never produce a 1px jump. */
+.dsh-mm-section .dsh-mm-button,
+.dsh-mm-section .dsh-mm-button:hover,
+.dsh-mm-section .dsh-mm-button:active,
+.dsh-mm-section .dsh-mm-button:focus,
+.dsh-mm-section .dsh-mm-button:focus-visible,
+.dsh-mm-section .dsh-mm-link,
+.dsh-mm-section .dsh-mm-link:hover,
+.dsh-mm-section .dsh-mm-link:active,
+.dsh-mm-section .dsh-mm-link:focus-visible,
+.dsh-mm-section .dsh-mm-summary,
+.dsh-mm-section .dsh-mm-summary:hover{transform:none;filter:none;animation:none;will-change:auto}
 .dsh-mm-hint{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
 .dsh-mm-details{border-top:1px solid var(--dsw-alias-border-l2);padding-top:10px}
-.dsh-mm-summary{align-items:center;border-radius:6px;color:var(--dsw-alias-label-secondary);cursor:pointer;display:flex;font-size:12px;font-weight:500;gap:6px;line-height:18px;list-style:none;margin-left:-4px;padding:2px 4px;width:fit-content}
+.dsh-mm-summary{align-items:center;border:1px solid transparent;border-radius:6px;color:var(--dsw-alias-label-secondary);cursor:pointer;display:flex;font-size:12px;font-weight:500;gap:6px;line-height:18px;list-style:none;margin-left:-6px;padding:2px 6px;width:fit-content;transform:none;filter:none;animation:none;transition:background-color .12s ease,color .12s ease}
 .dsh-mm-summary::-webkit-details-marker{display:none}
 .dsh-mm-summary::before{border-bottom:1.5px solid;border-right:1.5px solid;content:"";height:5px;transform:rotate(-45deg) translate(-1px,-1px);transition:transform .12s;width:5px}
 .dsh-mm-details[open]>.dsh-mm-summary::before{transform:rotate(45deg) translate(-1px,-1px)}
-.dsh-mm-summary:hover{color:var(--dsw-alias-label-primary)}
+.dsh-mm-summary:hover{background-color:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .dsh-mm-steps{color:var(--dsw-alias-label-tertiary);display:flex;flex-direction:column;font-size:12px;gap:4px;line-height:18px;margin:8px 0 0;padding-left:18px}
 .dsh-mm-modelList{display:flex;flex-direction:column;gap:6px;list-style:none;margin:0;padding:0}
 .dsh-mm-modelRow{border:1px solid var(--dsw-alias-border-l2);border-radius:8px;display:grid;gap:10px;grid-template-columns:8px minmax(0,1fr);padding:8px 10px}
@@ -157,6 +212,15 @@ window.__ModuleLoader__.load({
 @media (max-width:560px){.dsh-mm-card{padding:12px}.dsh-mm-editor{padding:12px}.dsh-mm-rowMeta{display:none}}
 @media (prefers-reduced-motion:reduce){.dsh-mm-summary::before{transition:none}}
 `
+
+    const FINGERPRINT_FIELDS = [
+      { key: 'userAgent', label: 'fingerprint.userAgent' },
+      { key: 'secChUa', label: 'fingerprint.secChUa' },
+      { key: 'secChUaPlatform', label: 'fingerprint.secChUaPlatform' },
+      { key: 'secChUaMobile', label: 'fingerprint.secChUaMobile' },
+      { key: 'acceptLanguage', label: 'fingerprint.acceptLanguage' },
+      { key: 'clientVersion', label: 'fingerprint.clientVersion' },
+    ]
 
     function createSection(t) {
       function request(path, body) {
@@ -190,6 +254,7 @@ window.__ModuleLoader__.load({
         const [cookies, setCookies] = React.useState('')
         const [busy, setBusy] = React.useState('')
         const [message, setMessage] = React.useState(null)
+        const [fpDraft, setFpDraft] = React.useState(null)
 
         const load = React.useCallback(async () => {
           try {
@@ -282,10 +347,66 @@ window.__ModuleLoader__.load({
           }
         }
 
+        const setDefault = async (model) => {
+          setBusy(`default:${model}`)
+          setMessage(null)
+          try {
+            const result = await request('/my-model/api/default', { model })
+            setStatus((prev) =>
+              prev ? { ...prev, defaultSelection: result.defaultSelection ?? prev.defaultSelection } : prev,
+            )
+            setMessage({ kind: 'ok', text: t('message.defaultSet') })
+          } catch (error) {
+            setMessage({ kind: 'error', text: error.message ?? String(error) })
+          } finally {
+            setBusy('')
+          }
+        }
+
+        const saveFingerprint = async () => {
+          if (!fp) return
+          setBusy('fingerprint')
+          setMessage(null)
+          try {
+            const next = await request('/my-model/api/fingerprint', {
+              userAgent: fp.userAgent ?? '',
+              secChUa: fp.secChUa ?? '',
+              secChUaPlatform: fp.secChUaPlatform ?? '',
+              secChUaMobile: fp.secChUaMobile ?? '',
+              acceptLanguage: fp.acceptLanguage ?? '',
+              clientVersion: fp.clientVersion ?? '',
+            })
+            setStatus(next)
+            setFpDraft(null)
+            setMessage({ kind: 'ok', text: t('fingerprint.saved') })
+          } catch (error) {
+            setMessage({ kind: 'error', text: error.message ?? String(error) })
+          } finally {
+            setBusy('')
+          }
+        }
+
+        const resetFingerprint = async () => {
+          setBusy('fingerprint')
+          setMessage(null)
+          try {
+            const next = await request('/my-model/api/fingerprint', { reset: true })
+            setStatus(next)
+            setFpDraft(null)
+            setMessage({ kind: 'ok', text: t('fingerprint.resetDone') })
+          } catch (error) {
+            setMessage({ kind: 'error', text: error.message ?? String(error) })
+          } finally {
+            setBusy('')
+          }
+        }
+
         const tokenConfigured = status?.token?.configured === true
         const cookieConfigured = status?.cookies?.configured === true
         const active = status?.provider?.active === true
         const models = Array.isArray(status?.models) ? status.models : []
+        const fp = fpDraft ?? status?.fingerprint ?? null
+        const fpEditable = status?.fingerprint?.persistable === true
         const canSave = Boolean(token.trim() || cookies.trim())
         const canTest = tokenConfigured || Boolean(token.trim())
         const retry = () => {
@@ -470,12 +591,88 @@ window.__ModuleLoader__.load({
                           h('div', { className: 'dsh-mm-modelName' }, model.name),
                           h('div', { className: 'dsh-mm-modelDesc' }, model.description),
                           !model.routable ? h('div', { className: 'dsh-mm-modelDesc' }, t('models.unavailable')) : null,
+                          status?.defaultSelection?.provider === status?.provider?.id &&
+                          status?.defaultSelection?.model === model.id
+                            ? h('div', { className: 'dsh-mm-modelDesc' }, t('models.currentDefault'))
+                            : h(
+                                'button',
+                                {
+                                  className: 'dsh-mm-link',
+                                  type: 'button',
+                                  disabled: Boolean(busy) || !model.routable,
+                                  onClick: () => setDefault(model.id),
+                                },
+                                t('models.setDefault'),
+                              ),
                         ),
                       ),
                     ),
                   )
                 : h('p', { className: 'dsh-mm-hint' }, t('models.empty')),
             ),
+            status?.fingerprint
+              ? h(
+                  'li',
+                  { className: 'dsh-mm-card' },
+                  h(
+                    'div',
+                    { className: 'dsh-mm-rowHead' },
+                    h('span', { className: 'dsh-mm-name' }, t('fingerprint.title')),
+                    h(
+                      'span',
+                      { className: 'dsh-mm-tag' },
+                      status.fingerprint.overridden ? t('fingerprint.overridden') : t('fingerprint.defaultTag'),
+                    ),
+                  ),
+                  h('p', { className: 'dsh-mm-rowDesc' }, t('fingerprint.desc')),
+                  h(
+                    'div',
+                    { className: 'dsh-mm-editor' },
+                    FINGERPRINT_FIELDS.map((field) =>
+                      h(
+                        'label',
+                        { className: 'dsh-mm-field', htmlFor: `dsh-mm-fp-${field.key}`, key: field.key },
+                        h('span', { className: 'dsh-mm-fieldLabel' }, t(field.label)),
+                        h('input', {
+                          id: `dsh-mm-fp-${field.key}`,
+                          className: 'dsh-mm-input',
+                          type: 'text',
+                          autoComplete: 'off',
+                          spellCheck: false,
+                          value: fp?.[field.key] ?? '',
+                          onChange: (event) =>
+                            setFpDraft({ ...(fp ?? status.fingerprint), [field.key]: event.target.value }),
+                        }),
+                      ),
+                    ),
+                    h(
+                      'div',
+                      { className: 'dsh-mm-actions' },
+                      h(
+                        'button',
+                        {
+                          className: 'dsh-mm-button primary',
+                          type: 'button',
+                          disabled: Boolean(busy) || !fpEditable,
+                          onClick: saveFingerprint,
+                        },
+                        busy === 'fingerprint' ? t('action.saving') : t('fingerprint.save'),
+                      ),
+                      h(
+                        'button',
+                        {
+                          className: 'dsh-mm-button',
+                          type: 'button',
+                          disabled: Boolean(busy) || !fpEditable,
+                          onClick: resetFingerprint,
+                        },
+                        t('fingerprint.reset'),
+                      ),
+                    ),
+                    !fpEditable ? h('p', { className: 'dsh-mm-hint' }, t('fingerprint.unavailable')) : null,
+                  ),
+                )
+              : null,
           ),
           h('p', { className: 'dsh-mm-notice' }, t('notice')),
         )

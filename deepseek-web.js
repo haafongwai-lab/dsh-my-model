@@ -18,11 +18,31 @@ export const CHALLENGE_PATH = '/api/v0/chat/create_pow_challenge'
 export const SESSION_PATH = '/api/v0/chat_session/create'
 export const COMPLETION_PATH = '/api/v0/chat/completion'
 
-const DEFAULT_UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+export const DEFAULT_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36'
+
+/**
+ * Browser-fingerprint defaults, measured on this machine (Chrome 155 /
+ * DeepSeek web client 2.5.0). They still go stale as the browser and web client
+ * update — a profile that drifts from the live product is a strong upstream
+ * risk-control signal. Override `userAgent`, `secChUa`, `secChUaPlatform`,
+ * `clientVersion` (and the rest) from the settings page or plugin config. The
+ * adapter logs a reminder while the built-in defaults are still in use.
+ */
+export const DEFAULT_SEC_CH_UA = '"Google Chrome";v="155", "Chromium";v="155", "Not(A:Brand";v="24"'
+export const DEFAULT_SEC_CH_UA_PLATFORM = '"Windows"'
+export const DEFAULT_SEC_CH_UA_MOBILE = '?0'
+export const DEFAULT_ACCEPT_LANGUAGE = 'zh-CN,zh;q=0.9'
+export const DEFAULT_SEC_FETCH_SITE = 'same-origin'
+export const DEFAULT_SEC_FETCH_MODE = 'cors'
+export const DEFAULT_SEC_FETCH_DEST = 'empty'
+export const DEFAULT_PRIORITY = 'u=1, i'
+export const DEFAULT_CLIENT_LOCALE = 'zh_CN'
+export const DEFAULT_CLIENT_PLATFORM = 'web'
+export const DEFAULT_CLIENT_BUNDLE_ID = 'com.deepseek.chat'
 
 /** Keep in sync with the deployed web client; stale values invite risk control. */
-export const DEFAULT_CLIENT_VERSION = '2.4.0'
+export const DEFAULT_CLIENT_VERSION = '2.5.0'
 
 const EFFORTS = [
   { id: 'off', name: 'Off', description: 'Answer without the web reasoning phase.' },
@@ -146,6 +166,33 @@ function isRateLimitText(text) {
 }
 
 /**
+ * Some WAFs return a challenge page with HTTP 200 and `text/html` instead of a
+ * 4xx. Detect that so it surfaces as `WAF_CHALLENGE` (with the "paste cookies"
+ * hint) rather than a generic `UPSTREAM` failure.
+ */
+function isChallengeBody(text, response) {
+  let type = ''
+  let server = ''
+  try {
+    type = String(response.headers.get('content-type') ?? '').toLowerCase()
+    server = String(response.headers.get('server') ?? '').toLowerCase()
+  } catch {
+    type = ''
+    server = ''
+  }
+  const body = String(text ?? '')
+  const challenge =
+    /captcha|challenge|verify|human|robot|awswaf|cf-|hwwaf|hw-waf|slide|滑块|人机验证|验证码|请完成验证|安全验证|安全检测/i.test(
+      body,
+    )
+  if (!challenge) return false
+  // Huawei Cloud WAF (Server: CW, HWWAF* cookies) can serve its challenge as
+  // HTML; accept a Huawei hint even when the content type is not text/html.
+  if (server === 'cw' || /hwwaf|hw-waf|huawei\s*waf|cloud\s*waf/i.test(body)) return true
+  return type.includes('text/html')
+}
+
+/**
  * Serializes upstream chat turns for one account and enforces a cooldown after
  * a rate limit. The web product throttles per account, so parallel Harness
  * consumers (main turn, title generation, subagents) are the common source of
@@ -157,12 +204,17 @@ function isRateLimitText(text) {
 export class TurnScheduler {
   constructor({
     maxConcurrentTurns = 1,
-    minTurnGapMs = 1200,
+    minTurnGapMs = 3000,
     maxAutoWaitMs = 20000,
     cooldownBaseMs = 15000,
     maxCooldownMs = 120000,
     minCooldownMs = 1000,
     jitterRatio = 0.2,
+    humanizePacing = true,
+    turnGapJitter = 0.6,
+    humanLongPauseChance = 0.25,
+    humanLongPauseMinMs = 5000,
+    humanLongPauseMaxMs = 20000,
     random = Math.random,
     logger,
   } = {}) {
@@ -173,6 +225,18 @@ export class TurnScheduler {
     this.minCooldownMs = clampNumber(minCooldownMs, 0, this.cooldownBaseMs)
     this.maxCooldownMs = Math.max(this.cooldownBaseMs, clampNumber(maxCooldownMs, this.cooldownBaseMs, 600000))
     this.jitterRatio = clampNumber(jitterRatio, 0, 1)
+    // Human-like pacing (方案A). Jitter the inter-turn gap and insert the odd
+    // longer idle so the cadence resembles a person rather than a fixed-rate
+    // machine loop. The slot is held during the idle, so concurrency limits
+    // still hold.
+    this.humanizePacing = humanizePacing !== false
+    this.turnGapJitter = clampNumber(turnGapJitter, 0, 2)
+    this.humanLongPauseChance = clampNumber(humanLongPauseChance, 0, 1)
+    this.humanLongPauseMinMs = clampNumber(humanLongPauseMinMs, 0, 60000)
+    this.humanLongPauseMaxMs = Math.max(
+      this.humanLongPauseMinMs,
+      clampNumber(humanLongPauseMaxMs, this.humanLongPauseMinMs, 120000),
+    )
     this.random = random
     this.logger = logger
     this.active = 0
@@ -200,10 +264,26 @@ export class TurnScheduler {
           { providerRetryAfterMs: remaining, fromGate: true },
         )
       }
-      const startAt = Math.max(this.lastStartAt + this.minGapMs, this.cooldownUntil)
+      // One-sided jitter: never start a turn faster than minGapMs (a shorter gap
+      // would increase burst risk), only add a random delay on top of it.
+      const gap = this.humanizePacing
+        ? this.minGapMs * (1 + this.random() * this.turnGapJitter)
+        : this.minGapMs
+      const startAt = Math.max(this.lastStartAt + gap, this.cooldownUntil)
       if (this.active < this.maxConcurrent && now >= startAt) {
         this.active += 1
         this.lastStartAt = now
+        // Occasionally hold the slot for a longer idle before the turn starts
+        // so the request cadence looks less like a fixed-rate loop. Only applied
+        // when a slot is actually being granted, never during a rate-limit
+        // cooldown, and the slot stays held so concurrency is still respected.
+        if (this.humanizePacing && this.random() < this.humanLongPauseChance) {
+          const pause =
+            this.humanLongPauseMinMs +
+            this.random() * Math.max(0, this.humanLongPauseMaxMs - this.humanLongPauseMinMs)
+          this.logger?.debug?.(`my-model: pacing pause ${Math.round(pause / 1000)}s before next turn`)
+          await this.wait(pause, signal)
+        }
         let released = false
         return () => {
           if (released) return
@@ -365,6 +445,19 @@ export class DeepSeekWebClient {
     baseURL = 'https://chat.deepseek.com',
     timeoutMs = 300000,
     clientVersion,
+    userAgent,
+    secChUa,
+    secChUaPlatform,
+    secChUaMobile,
+    acceptLanguage,
+    secFetchSite,
+    secFetchMode,
+    secFetchDest,
+    priority,
+    referer,
+    clientLocale,
+    clientPlatform,
+    clientBundleId,
     token,
     cookies,
     resolveToken,
@@ -375,6 +468,37 @@ export class DeepSeekWebClient {
     this.timeoutMs = Math.max(15000, Number(timeoutMs) || 300000)
     this.clientVersion =
       typeof clientVersion === 'string' && clientVersion.trim() ? clientVersion.trim() : DEFAULT_CLIENT_VERSION
+    // Browser-fingerprint fields. Kept configurable so the request profile can
+    // be matched to the browser that issued the login token; a profile that
+    // drifts from the live web client invites upstream risk control.
+    this.userAgent = typeof userAgent === 'string' && userAgent.trim() ? userAgent.trim() : DEFAULT_UA
+    this.secChUa = typeof secChUa === 'string' && secChUa.trim() ? secChUa.trim() : DEFAULT_SEC_CH_UA
+    this.secChUaPlatform =
+      typeof secChUaPlatform === 'string' && secChUaPlatform.trim()
+        ? secChUaPlatform.trim()
+        : DEFAULT_SEC_CH_UA_PLATFORM
+    this.secChUaMobile =
+      typeof secChUaMobile === 'string' && secChUaMobile.trim() ? secChUaMobile.trim() : DEFAULT_SEC_CH_UA_MOBILE
+    this.acceptLanguage =
+      typeof acceptLanguage === 'string' && acceptLanguage.trim()
+        ? acceptLanguage.trim()
+        : DEFAULT_ACCEPT_LANGUAGE
+    // Browser fetch-metadata / priority headers, captured from a real
+    // same-origin fetch on chat.deepseek.com. Configurable for future changes.
+    this.secFetchSite =
+      typeof secFetchSite === 'string' && secFetchSite.trim() ? secFetchSite.trim() : DEFAULT_SEC_FETCH_SITE
+    this.secFetchMode =
+      typeof secFetchMode === 'string' && secFetchMode.trim() ? secFetchMode.trim() : DEFAULT_SEC_FETCH_MODE
+    this.secFetchDest =
+      typeof secFetchDest === 'string' && secFetchDest.trim() ? secFetchDest.trim() : DEFAULT_SEC_FETCH_DEST
+    this.priority = typeof priority === 'string' && priority.trim() ? priority.trim() : DEFAULT_PRIORITY
+    this.referer = typeof referer === 'string' && referer.trim() ? referer.trim() : `${this.baseURL}/a/chat/`
+    this.clientLocale =
+      typeof clientLocale === 'string' && clientLocale.trim() ? clientLocale.trim() : DEFAULT_CLIENT_LOCALE
+    this.clientPlatform =
+      typeof clientPlatform === 'string' && clientPlatform.trim() ? clientPlatform.trim() : DEFAULT_CLIENT_PLATFORM
+    this.clientBundleId =
+      typeof clientBundleId === 'string' && clientBundleId.trim() ? clientBundleId.trim() : DEFAULT_CLIENT_BUNDLE_ID
     this.token = token
     this.cookies = cookies
     this.resolveToken = resolveToken
@@ -423,20 +547,24 @@ export class DeepSeekWebClient {
     const timezoneOffset = String(-new Date().getTimezoneOffset() * 60)
     const headers = {
       accept: accept ?? 'application/json',
-      'accept-language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+      'accept-language': this.acceptLanguage,
       authorization: `Bearer ${token}`,
       'content-type': 'application/json',
       origin: this.baseURL,
-      referer: `${this.baseURL}/a/chat/`,
-      'user-agent': DEFAULT_UA,
+      referer: this.referer,
+      'sec-fetch-site': this.secFetchSite,
+      'sec-fetch-mode': this.secFetchMode,
+      'sec-fetch-dest': this.secFetchDest,
+      priority: this.priority,
+      'user-agent': this.userAgent,
       'x-client-version': this.clientVersion,
-      'x-client-platform': 'web',
-      'x-client-locale': 'zh_CN',
+      'x-client-platform': this.clientPlatform,
+      'x-client-locale': this.clientLocale,
       'x-client-timezone-offset': timezoneOffset,
-      'x-client-bundle-id': 'com.deepseek.chat',
-      'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-      'sec-ch-ua-mobile': '?0',
-      'sec-ch-ua-platform': '"Windows"',
+      'x-client-bundle-id': this.clientBundleId,
+      'sec-ch-ua': this.secChUa,
+      'sec-ch-ua-mobile': this.secChUaMobile,
+      'sec-ch-ua-platform': this.secChUaPlatform,
     }
     const cookie = this.jar.header()
     if (cookie) headers.cookie = cookie
@@ -480,6 +608,13 @@ export class DeepSeekWebClient {
       json = JSON.parse(text)
     } catch {
       const status = response.status
+      if (isChallengeBody(text, response)) {
+        throw new AdapterError(
+          'DeepSeek Web returned a human-verification challenge. Open chat.deepseek.com in your browser, complete the challenge, then paste the site cookies into Settings → My Model → Cookie.',
+          'WAF_CHALLENGE',
+          status,
+        )
+      }
       const code =
         status === 429
           ? 'RATE_LIMIT'
@@ -532,7 +667,12 @@ export class DeepSeekWebClient {
   httpError(response, body) {
     const wafAction = String(response.headers.get('x-amzn-waf-action') ?? '').toLowerCase()
     const cfMitigated = String(response.headers.get('cf-mitigated') ?? '').toLowerCase()
-    if (wafAction === 'captcha' || wafAction === 'challenge' || cfMitigated === 'challenge') {
+    if (
+      wafAction === 'captcha' ||
+      wafAction === 'challenge' ||
+      cfMitigated === 'challenge' ||
+      isChallengeBody(body, response)
+    ) {
       return new AdapterError(
         'DeepSeek Web returned a human-verification challenge. Open chat.deepseek.com in your browser, complete the challenge, then paste the site cookies into Settings → My Model → Cookie.',
         'WAF_CHALLENGE',
@@ -659,7 +799,7 @@ export class DeepSeekWebClient {
     return { latencyMs: Date.now() - started, algorithm: payload.algorithm }
   }
 
-  async *readSse(response, signal) {
+  async *readSse(response, signal, state = {}) {
     if (!response.body) throw new AdapterError('DeepSeek Web returned no response body', 'UPSTREAM', response.status)
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
@@ -693,7 +833,7 @@ export class DeepSeekWebClient {
             } catch {
               continue
             }
-            yield* this.decodeData(data, event)
+            yield* this.decodeData(data, event, state)
             event = 'message'
             continue
           }
@@ -704,10 +844,12 @@ export class DeepSeekWebClient {
             // SSE comments / keep-alives are ignored.
             continue
           }
-          yield* this.decodeData(data, event)
+          yield* this.decodeData(data, event, state)
           event = 'message'
         }
       }
+      // Flush any trailing multi-byte sequence before handling the last frame.
+      buffer += decoder.decode()
       if (buffer.trim()) {
         let data
         try {
@@ -716,7 +858,7 @@ export class DeepSeekWebClient {
           // Ignore a truncated trailing frame.
           data = undefined
         }
-        if (data !== undefined) yield* this.decodeData(data, event)
+        if (data !== undefined) yield* this.decodeData(data, event, state)
       }
     } finally {
       try {
@@ -727,7 +869,7 @@ export class DeepSeekWebClient {
     }
   }
 
-  *decodeData(data, event) {
+  *decodeData(data, event, state = {}) {
     if (!data || typeof data !== 'object') return
     if (typeof data.code === 'number' && data.code !== 0) throw this.codeError(data)
     const bizCode = data.data?.biz_code
@@ -768,9 +910,9 @@ export class DeepSeekWebClient {
           if (typeof text === 'string' && text) yield { type: thinking ? 'reasoning' : 'text', text }
         }
         const last = fragments[fragments.length - 1]
-        this.lastFragmentType = last?.type === 'THINK' ? 'reasoning' : 'text'
+        state.fragmentType = last?.type === 'THINK' ? 'reasoning' : 'text'
       } else if (typeof response.content === 'string' && response.content) {
-        this.lastFragmentType = 'text'
+        state.fragmentType = 'text'
         yield { type: 'text', text: response.content }
       }
       return
@@ -778,11 +920,11 @@ export class DeepSeekWebClient {
     const p = typeof data.p === 'string' ? data.p : ''
     const o = typeof data.o === 'string' ? data.o : ''
     if (p === 'response/fragments' && o === 'APPEND') {
-      if (Array.isArray(v) && v[0]) this.lastFragmentType = v[0].type === 'THINK' ? 'reasoning' : 'text'
+      if (Array.isArray(v) && v[0]) state.fragmentType = v[0].type === 'THINK' ? 'reasoning' : 'text'
       return
     }
     if (p === 'response/fragments/-1/content' && (o === 'APPEND' || o === '')) {
-      if (typeof v === 'string' && v) yield { type: this.lastFragmentType === 'reasoning' ? 'reasoning' : 'text', text: v }
+      if (typeof v === 'string' && v) yield { type: state.fragmentType === 'reasoning' ? 'reasoning' : 'text', text: v }
       return
     }
     if (p === 'response/status') {
@@ -790,13 +932,42 @@ export class DeepSeekWebClient {
       return
     }
     if (p === 'response/content' && o === 'APPEND') {
-      this.lastFragmentType = 'text'
+      state.fragmentType = 'text'
       if (typeof v === 'string' && v) yield { type: 'text', text: v }
       return
     }
     if ('v' in data && !('p' in data) && !('o' in data)) {
-      if (typeof v === 'string' && v) yield { type: this.lastFragmentType === 'reasoning' ? 'reasoning' : 'text', text: v }
+      if (typeof v === 'string' && v) yield { type: state.fragmentType === 'reasoning' ? 'reasoning' : 'text', text: v }
     }
+  }
+
+  /**
+   * Send one completion request, re-solving the PoW challenge once if the
+   * upstream rejects it. A challenge can expire between fetch and use on a slow
+   * connection; one retry turns that into a success instead of a failed turn.
+   */
+  async completionRequest(body, signal) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const pow = await this.powHeader(COMPLETION_PATH)
+      const response = await this.request(COMPLETION_PATH, body, {
+        accept: 'text/event-stream',
+        signal,
+        headers: { 'x-ds-pow-response': pow },
+      })
+      if (response.ok) return response
+      const detail = await response.text().catch(() => '')
+      if (attempt === 0 && this.isPowError(response, detail)) {
+        this.logger?.warn?.('my-model: PoW challenge rejected; solving a fresh one and retrying')
+        continue
+      }
+      throw this.httpError(response, detail)
+    }
+    throw new AdapterError('DeepSeek Web PoW retry exhausted', 'UPSTREAM')
+  }
+
+  isPowError(response, detail) {
+    if (![400, 403, 422].includes(response.status)) return false
+    return /pow|challenge|signature|verif|expir/i.test(String(detail))
   }
 
   /**
@@ -813,8 +984,9 @@ export class DeepSeekWebClient {
    */
   async *completionStream({ sessionId, parentMessageId, prompt, thinking, search, signal, state }) {
     state ??= {}
-    this.lastFragmentType = null
-    const pow = await this.powHeader(COMPLETION_PATH)
+    // Per-stream fragment-type state. Kept local so two overlapping streams
+    // cannot corrupt each other's reasoning/text classification.
+    const streamState = {}
     const body = {
       chat_session_id: sessionId,
       parent_message_id: parentMessageId ?? null,
@@ -826,12 +998,26 @@ export class DeepSeekWebClient {
       search_enabled: Boolean(search),
       preempt: false,
     }
-    const response = await this.request(COMPLETION_PATH, body, {
-      accept: 'text/event-stream',
-      signal,
-      headers: { 'x-ds-pow-response': pow },
-    })
-    if (!response.ok) throw this.httpError(response, await response.text().catch(() => ''))
+    const response = await this.completionRequest(body, signal)
+
+    // A WAF can answer a 200 with an HTML challenge instead of an SSE stream;
+    // surface that as WAF_CHALLENGE rather than an empty-completion failure.
+    const contentType = String(response.headers.get('content-type') ?? '').toLowerCase()
+    if (!contentType.includes('text/event-stream')) {
+      const detail = await response.text().catch(() => '')
+      if (isChallengeBody(detail, response)) {
+        throw new AdapterError(
+          'DeepSeek Web returned a human-verification challenge. Open chat.deepseek.com in your browser, complete the challenge, then paste the site cookies into Settings → My Model → Cookie.',
+          'WAF_CHALLENGE',
+          response.status,
+        )
+      }
+      throw new AdapterError(
+        `DeepSeek Web returned ${contentType || 'an unknown content type'} instead of an event stream: ${detail.slice(0, 200)}`,
+        'UPSTREAM',
+        response.status,
+      )
+    }
 
     let reasoningOpen = false
     let textOpen = false
@@ -841,7 +1027,7 @@ export class DeepSeekWebClient {
     const toolCalls = []
     let finished = false
 
-    const emitText = async function* (client, value) {
+    const emitText = async function* (value) {
       if (!value) return
       text += value
       if (!textOpen) {
@@ -852,7 +1038,7 @@ export class DeepSeekWebClient {
     }
 
     try {
-      for await (const event of this.readSse(response, signal)) {
+      for await (const event of this.readSse(response, signal, streamState)) {
         if (event.type === 'ready') {
           state.responseMessageId = event.id
           continue
@@ -876,7 +1062,7 @@ export class DeepSeekWebClient {
         if (event.type === 'text' && event.text) {
           for (const item of sieve.feed(event.text)) {
             if (item.type === 'text') {
-              yield* emitText(this, item.text)
+              yield* emitText(item.text)
             } else if (item.type === 'tools') {
               toolCalls.push(...item.calls)
             }
@@ -886,7 +1072,7 @@ export class DeepSeekWebClient {
       }
       if (!finished) {
         for (const item of sieve.flush()) {
-          if (item.type === 'text') yield* emitText(this, item.text)
+          if (item.type === 'text') yield* emitText(item.text)
           else if (item.type === 'tools') toolCalls.push(...item.calls)
         }
       }
@@ -964,7 +1150,21 @@ export class DeepSeekWebAdapter {
     baseURL,
     timeoutMs,
     clientVersion,
+    userAgent,
+    secChUa,
+    secChUaPlatform,
+    secChUaMobile,
+    acceptLanguage,
+    secFetchSite,
+    secFetchMode,
+    secFetchDest,
+    priority,
+    referer,
+    clientLocale,
+    clientPlatform,
+    clientBundleId,
     maxPromptChars,
+    maxToolChars,
     logger,
     maxConcurrentTurns,
     minTurnGapMs,
@@ -972,9 +1172,35 @@ export class DeepSeekWebAdapter {
     cooldownBaseMs,
     maxCooldownMs,
     jitterRatio,
+    humanizePacing,
+    turnGapJitter,
+    humanLongPauseChance,
+    humanLongPauseMinMs,
+    humanLongPauseMaxMs,
   } = {}) {
-    this.client = new DeepSeekWebClient({ baseURL, timeoutMs, clientVersion, resolveToken, resolveCookies, logger })
+    this.client = new DeepSeekWebClient({
+      baseURL,
+      timeoutMs,
+      clientVersion,
+      userAgent,
+      secChUa,
+      secChUaPlatform,
+      secChUaMobile,
+      acceptLanguage,
+      secFetchSite,
+      secFetchMode,
+      secFetchDest,
+      priority,
+      referer,
+      clientLocale,
+      clientPlatform,
+      clientBundleId,
+      resolveToken,
+      resolveCookies,
+      logger,
+    })
     this.maxPromptChars = Math.max(20000, Number(maxPromptChars) || 1_000_000)
+    this.maxToolChars = Math.max(500, Number(maxToolChars) || 8000)
     this.logger = logger
     this.sessions = new Map()
     this.gate = new TurnScheduler({
@@ -984,6 +1210,11 @@ export class DeepSeekWebAdapter {
       cooldownBaseMs,
       maxCooldownMs,
       jitterRatio,
+      humanizePacing,
+      turnGapJitter,
+      humanLongPauseChance,
+      humanLongPauseMinMs,
+      humanLongPauseMaxMs,
       logger,
     })
   }
@@ -1054,6 +1285,9 @@ export class DeepSeekWebAdapter {
 
   remember(cacheKey, plan, responseMessageId) {
     if (!cacheKey || !plan?.sessionId || responseMessageId === null || responseMessageId === undefined) return
+    // Refresh insertion order so the eviction below is LRU, not FIFO: touching
+    // an existing key must move it to the newest position.
+    this.sessions.delete(cacheKey)
     this.sessions.set(cacheKey, {
       sessionId: plan.sessionId,
       prompt: plan.fullPrompt,
@@ -1077,6 +1311,7 @@ export class DeepSeekWebAdapter {
       messages: options.messages,
       tools: options.tools,
       maxChars: this.maxPromptChars,
+      maxToolChars: this.maxToolChars,
     })
     if (!prompt.trim()) throw new AdapterError('DeepSeek Web prompt is empty', 'INVALID_REQUEST')
     // A web thread's model is fixed when it is created, so a mid-session model
@@ -1134,6 +1369,11 @@ export class DeepSeekWebAdapter {
           !retryableFailure ||
           error?.fromGate === true
         if (stopping) {
+          // Log terminal failures (mute, WAF, quota, credential) so the plugin
+          // log shows why the turn stopped; rate limits already log their own.
+          if (error instanceof AdapterError && error.code !== 'ABORTED' && error.code !== 'RATE_LIMIT') {
+            this.logger?.warn?.(`my-model: terminal failure ${error.code}: ${error.message}`)
+          }
           // Once output has started, a host-level retry would duplicate text;
           // report a terminal stream interruption instead.
           if (emitted && error?.code !== 'ABORTED') throw this.streamInterrupted(error)

@@ -6,8 +6,21 @@
  * cookie blob live in the Harness credential store, never in the profile
  * patch.
  */
+import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
+  DEFAULT_ACCEPT_LANGUAGE,
   DEFAULT_CLIENT_VERSION,
+  DEFAULT_PRIORITY,
+  DEFAULT_SEC_CH_UA,
+  DEFAULT_SEC_CH_UA_MOBILE,
+  DEFAULT_SEC_CH_UA_PLATFORM,
+  DEFAULT_SEC_FETCH_DEST,
+  DEFAULT_SEC_FETCH_MODE,
+  DEFAULT_SEC_FETCH_SITE,
+  DEFAULT_UA,
   DeepSeekWebAdapter,
   DeepSeekWebClient,
   MODELS,
@@ -26,13 +39,24 @@ const DEFAULTS = {
   cookiesEnv: 'DEEPSEEK_WEB_COOKIES',
   timeoutMs: 300000,
   maxPromptChars: 1_000_000,
+  // Tool results are truncated and secret-redacted before they reach the web
+  // prompt, so a large command output cannot dominate the turn or leak keys.
+  maxToolChars: 8000,
   // Rate-limit shaping for the shared web account. One generation at a time,
-  // a short gap between turn starts, and a capped exponential cooldown.
-  minTurnGapMs: 1200,
+  // a human-like gap between turn starts, and a capped exponential cooldown.
+  minTurnGapMs: 3000,
   maxConcurrentTurns: 1,
   maxAutoWaitMs: 20000,
   cooldownBaseMs: 15000,
   maxCooldownMs: 120000,
+  // Human-like pacing (方案A): jitter the inter-turn gap and insert occasional
+  // idle pauses so the request cadence resembles a person. Set humanizePacing
+  // to false to revert to strict minTurnGapMs.
+  humanizePacing: true,
+  turnGapJitter: 0.6,
+  humanLongPauseChance: 0.25,
+  humanLongPauseMinMs: 5000,
+  humanLongPauseMaxMs: 20000,
 }
 
 export const Config = {
@@ -66,6 +90,161 @@ function safeGet(ctx, key) {
   }
 }
 
+const PROFILE_OVERRIDES_FILE = '.my-model.json'
+const FINGERPRINT_KEYS = [
+  'userAgent',
+  'secChUa',
+  'secChUaPlatform',
+  'secChUaMobile',
+  'acceptLanguage',
+  'clientVersion',
+  'secFetchSite',
+  'secFetchMode',
+  'secFetchDest',
+  'priority',
+  'referer',
+]
+
+/**
+ * Resolve the profile directory the loader anchored `baseUrl` at. The settings
+ * page persists its fingerprint overrides there (a dedicated JSON file), which
+ * the plugin merges over the loader config on the next boot. A dedicated file
+ * is used instead of rewriting `cordis.patch.yml`, which is the loader's
+ * comment-preserving patch layer.
+ */
+function profileDirOf(ctx) {
+  const candidates = [safeGet(ctx, 'baseUrl'), ctx?.baseUrl, ctx?.root?.baseUrl]
+  for (const base of candidates) {
+    if (!base) continue
+    try {
+      const url = base instanceof URL ? base : new URL(String(base))
+      if (url.protocol === 'file:') return fileURLToPath(url)
+    } catch {
+      // Not a URL; fall through to a plain path.
+    }
+    try {
+      const text = String(base)
+      if (text.startsWith('file:')) return fileURLToPath(text)
+      if (text) return text
+    } catch {
+      // Ignore and try the next candidate.
+    }
+  }
+  // Last resort: derive the profile directory from DSH_HOME and --profile.
+  try {
+    const home = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
+    const index = process.argv.indexOf('--profile')
+    const profile = index >= 0 ? process.argv[index + 1] : undefined
+    if (profile) return join(home, 'profiles', profile)
+  } catch {
+    // Ignore.
+  }
+  return undefined
+}
+
+function readProfileOverrides(dir) {
+  if (!dir) return {}
+  try {
+    const parsed = JSON.parse(readFileSync(join(dir, PROFILE_OVERRIDES_FILE), 'utf8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    const out = {}
+    for (const key of FINGERPRINT_KEYS) {
+      if (typeof parsed[key] === 'string' && parsed[key].trim()) out[key] = parsed[key].trim()
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+function writeProfileOverrides(dir, overrides) {
+  if (!dir) {
+    throw new ApiError(
+      409,
+      'The profile directory is unavailable, so the fingerprint cannot be persisted. Edit the plugin config manually.',
+      'NO_PROFILE_DIR',
+    )
+  }
+  mkdirSync(dir, { recursive: true })
+  const file = join(dir, PROFILE_OVERRIDES_FILE)
+  if (!overrides || Object.keys(overrides).length === 0) {
+    try {
+      unlinkSync(file)
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+    }
+    return
+  }
+  writeFileSync(file, `${JSON.stringify(overrides, null, 2)}\n`, 'utf8')
+}
+
+const LOG_FILE = 'my-model.log'
+const LOG_MAX_BYTES = 1024 * 1024
+
+/**
+ * Wrap the host logger so the plugin's own diagnostics also land in
+ * `<profile>/my-model.log`. The desktop app does not persist host stdout, so
+ * this file is the reliable place to inspect rate limits, WAF challenges, and
+ * fingerprint warnings. Rotates to `.1` once it exceeds 1 MB.
+ */
+function fileLogger(base, profileDir) {
+  if (!profileDir) return base
+  const file = join(profileDir, LOG_FILE)
+  let prepared = false
+  const prepare = () => {
+    if (prepared) return
+    prepared = true
+    try {
+      mkdirSync(profileDir, { recursive: true })
+      try {
+        if (statSync(file).size > LOG_MAX_BYTES) renameSync(file, `${file}.1`)
+      } catch {
+        // Missing or unreadable log file: start fresh.
+      }
+    } catch {
+      // Logging must never break the provider.
+    }
+  }
+  const write = (level, args) => {
+    prepare()
+    try {
+      const text = args
+        .map((arg) =>
+          typeof arg === 'string'
+            ? arg
+            : arg instanceof Error
+              ? (arg.stack ?? arg.message)
+              : JSON.stringify(arg),
+        )
+        .join(' ')
+      appendFileSync(file, `${new Date().toISOString()} [${level}] ${text}\n`)
+    } catch {
+      // Logging must never break the provider.
+    }
+    base?.[level]?.(...args)
+  }
+  return {
+    info: (...args) => write('info', args),
+    warn: (...args) => write('warn', args),
+    error: (...args) => write('error', args),
+    debug: (...args) => write('debug', args),
+  }
+}
+
+function applyFingerprintToClient(client, effective) {
+  client.userAgent = effective.userAgent ?? DEFAULT_UA
+  client.secChUa = effective.secChUa ?? DEFAULT_SEC_CH_UA
+  client.secChUaPlatform = effective.secChUaPlatform ?? DEFAULT_SEC_CH_UA_PLATFORM
+  client.secChUaMobile = effective.secChUaMobile ?? DEFAULT_SEC_CH_UA_MOBILE
+  client.acceptLanguage = effective.acceptLanguage ?? DEFAULT_ACCEPT_LANGUAGE
+  client.clientVersion = effective.clientVersion ?? DEFAULT_CLIENT_VERSION
+  client.secFetchSite = effective.secFetchSite ?? DEFAULT_SEC_FETCH_SITE
+  client.secFetchMode = effective.secFetchMode ?? DEFAULT_SEC_FETCH_MODE
+  client.secFetchDest = effective.secFetchDest ?? DEFAULT_SEC_FETCH_DEST
+  client.priority = effective.priority ?? DEFAULT_PRIORITY
+  client.referer = effective.referer ?? `${client.baseURL}/a/chat/`
+}
+
 function clampNumber(value, fallback, min, max) {
   const number = Number(value)
   if (!Number.isFinite(number)) return fallback
@@ -89,11 +268,51 @@ function optionsOf(config) {
         : DEFAULTS.cookiesEnv,
     timeoutMs: Math.max(15000, Number(input.timeoutMs) || DEFAULTS.timeoutMs),
     maxPromptChars: Math.max(20000, Number(input.maxPromptChars) || DEFAULTS.maxPromptChars),
+    maxToolChars: Math.max(500, Number(input.maxToolChars) || DEFAULTS.maxToolChars),
     minTurnGapMs: clampNumber(input.minTurnGapMs, DEFAULTS.minTurnGapMs, 0, 60000),
     maxConcurrentTurns: Math.round(clampNumber(input.maxConcurrentTurns, DEFAULTS.maxConcurrentTurns, 1, 4)),
     maxAutoWaitMs: clampNumber(input.maxAutoWaitMs, DEFAULTS.maxAutoWaitMs, 0, 120000),
     cooldownBaseMs,
     maxCooldownMs: clampNumber(input.maxCooldownMs, DEFAULTS.maxCooldownMs, cooldownBaseMs, 600000),
+    userAgent: typeof input.userAgent === 'string' && input.userAgent.trim() ? input.userAgent.trim() : undefined,
+    secChUa: typeof input.secChUa === 'string' && input.secChUa.trim() ? input.secChUa.trim() : undefined,
+    secChUaPlatform:
+      typeof input.secChUaPlatform === 'string' && input.secChUaPlatform.trim()
+        ? input.secChUaPlatform.trim()
+        : undefined,
+    secChUaMobile:
+      typeof input.secChUaMobile === 'string' && input.secChUaMobile.trim()
+        ? input.secChUaMobile.trim()
+        : undefined,
+    acceptLanguage:
+      typeof input.acceptLanguage === 'string' && input.acceptLanguage.trim()
+        ? input.acceptLanguage.trim()
+        : undefined,
+    secFetchSite:
+      typeof input.secFetchSite === 'string' && input.secFetchSite.trim()
+        ? input.secFetchSite.trim()
+        : undefined,
+    secFetchMode:
+      typeof input.secFetchMode === 'string' && input.secFetchMode.trim()
+        ? input.secFetchMode.trim()
+        : undefined,
+    secFetchDest:
+      typeof input.secFetchDest === 'string' && input.secFetchDest.trim()
+        ? input.secFetchDest.trim()
+        : undefined,
+    priority: typeof input.priority === 'string' && input.priority.trim() ? input.priority.trim() : undefined,
+    referer: typeof input.referer === 'string' && input.referer.trim() ? input.referer.trim() : undefined,
+    clientLocale:
+      typeof input.clientLocale === 'string' && input.clientLocale.trim() ? input.clientLocale.trim() : undefined,
+    clientPlatform:
+      typeof input.clientPlatform === 'string' && input.clientPlatform.trim() ? input.clientPlatform.trim() : undefined,
+    clientBundleId:
+      typeof input.clientBundleId === 'string' && input.clientBundleId.trim() ? input.clientBundleId.trim() : undefined,
+    humanizePacing: input.humanizePacing === false ? false : true,
+    turnGapJitter: clampNumber(input.turnGapJitter, DEFAULTS.turnGapJitter, 0, 2),
+    humanLongPauseChance: clampNumber(input.humanLongPauseChance, DEFAULTS.humanLongPauseChance, 0, 1),
+    humanLongPauseMinMs: clampNumber(input.humanLongPauseMinMs, DEFAULTS.humanLongPauseMinMs, 0, 60000),
+    humanLongPauseMaxMs: clampNumber(input.humanLongPauseMaxMs, DEFAULTS.humanLongPauseMaxMs, 0, 120000),
   }
 }
 
@@ -163,26 +382,56 @@ async function readJson(req) {
   }
 }
 
-function trusted(ctx, req, res) {
-  const connection = safeGet(ctx, 'connection')
-  if (!connection?.requestRejection) return true
+/**
+ * A cross-site browser request is the CSRF threat here. Modern browsers always
+ * send `Sec-Fetch-Site` (and `Origin` on POST), so reject those even when the
+ * host's `connection` guard is unavailable. A non-browser local client (curl,
+ * tests) sends neither header and is allowed.
+ */
+function sameOriginRequest(req) {
+  const site = String(req.headers?.['sec-fetch-site'] ?? '').toLowerCase()
+  if (site && site !== 'same-origin' && site !== 'none') return false
+  const origin = req.headers?.origin
+  if (!origin) return true
+  const host = req.headers?.host
+  if (!host) return false
   try {
-    const rejection = connection.requestRejection({ headers: req.headers })
-    if (rejection) {
-      res.writeHead(rejection)
-      res.end()
-      return false
-    }
-    return true
+    return new URL(origin).host === host
   } catch {
-    res.writeHead(403)
-    res.end()
     return false
   }
 }
 
-function createApi(ctx, options, adapter, state) {
+function trusted(ctx, req, res) {
+  const connection = safeGet(ctx, 'connection')
+  if (connection?.requestRejection) {
+    try {
+      const rejection = connection.requestRejection({ headers: req.headers })
+      if (rejection) {
+        res.writeHead(rejection)
+        res.end()
+        return false
+      }
+      return true
+    } catch {
+      res.writeHead(403)
+      res.end()
+      return false
+    }
+  }
+  // No host guard available: fail closed for cross-site browsers instead of
+  // allowing every local caller through.
+  if (!sameOriginRequest(req)) {
+    res.writeHead(403)
+    res.end()
+    return false
+  }
+  return true
+}
+
+function createApi(ctx, options, adapter, state, extras = {}) {
   const credentials = () => safeGet(ctx, 'credentials')
+  const log = extras.logger ?? ctx.logger
 
   const status = async () => {
     const token = await describeSecret(ctx, options.tokenEnv)
@@ -219,6 +468,21 @@ function createApi(ctx, options, adapter, state) {
       cookiesEnv: options.cookiesEnv,
       baseURL: options.baseURL,
       defaultSelection,
+      fingerprint: {
+        userAgent: adapter.client.userAgent,
+        secChUa: adapter.client.secChUa,
+        secChUaPlatform: adapter.client.secChUaPlatform,
+        secChUaMobile: adapter.client.secChUaMobile,
+        acceptLanguage: adapter.client.acceptLanguage,
+        clientVersion: adapter.client.clientVersion,
+        secFetchSite: adapter.client.secFetchSite,
+        secFetchMode: adapter.client.secFetchMode,
+        secFetchDest: adapter.client.secFetchDest,
+        priority: adapter.client.priority,
+        referer: adapter.client.referer,
+        overridden: Object.keys(readProfileOverrides(extras.profileDir)).length > 0,
+        persistable: Boolean(extras.profileDir),
+      },
       lastTest: state.lastTest,
     }
   }
@@ -269,10 +533,25 @@ function createApi(ctx, options, adapter, state) {
     const client = new DeepSeekWebClient({
       baseURL: options.baseURL,
       timeoutMs: Math.min(options.timeoutMs, 60000),
-      clientVersion: options.clientVersion,
+      // Use the live client's fingerprint so a settings-page change is reflected
+      // by "Test connection" without a restart.
+      clientVersion: adapter.client.clientVersion,
+      userAgent: adapter.client.userAgent,
+      secChUa: adapter.client.secChUa,
+      secChUaPlatform: adapter.client.secChUaPlatform,
+      secChUaMobile: adapter.client.secChUaMobile,
+      acceptLanguage: adapter.client.acceptLanguage,
+      secFetchSite: adapter.client.secFetchSite,
+      secFetchMode: adapter.client.secFetchMode,
+      secFetchDest: adapter.client.secFetchDest,
+      priority: adapter.client.priority,
+      referer: adapter.client.referer,
+      clientLocale: adapter.client.clientLocale,
+      clientPlatform: adapter.client.clientPlatform,
+      clientBundleId: adapter.client.clientBundleId,
       token,
       cookies,
-      logger: ctx.logger,
+      logger: log,
     })
     try {
       const result = await client.testAuth()
@@ -317,6 +596,50 @@ function createApi(ctx, options, adapter, state) {
     }
   }
 
+  const saveFingerprint = async (req) => {
+    const body = await readJson(req)
+    const dir = extras.profileDir
+    if (!dir) {
+      throw new ApiError(
+        409,
+        'The profile directory is unavailable, so the fingerprint cannot be persisted. Edit the plugin config manually.',
+        'NO_PROFILE_DIR',
+      )
+    }
+    const overrides = readProfileOverrides(dir)
+    if (body.reset === true) {
+      writeProfileOverrides(dir, {})
+    } else {
+      for (const key of FINGERPRINT_KEYS) {
+        if (!(key in body)) continue
+        const value = body[key]
+        if (value === null || value === undefined || value === '') {
+          delete overrides[key]
+          continue
+        }
+        if (typeof value !== 'string') {
+          throw new ApiError(400, `${key} must be a string.`, 'BAD_FINGERPRINT')
+        }
+        const trimmed = value.trim()
+        if (trimmed.length > 1024) {
+          throw new ApiError(400, `${key} is too long.`, 'FINGERPRINT_TOO_LONG')
+        }
+        if (/[\r\n]/.test(trimmed)) {
+          throw new ApiError(400, `${key} must be one line.`, 'FINGERPRINT_MULTILINE')
+        }
+        if (trimmed) overrides[key] = trimmed
+        else delete overrides[key]
+      }
+      writeProfileOverrides(dir, overrides)
+    }
+    // Apply immediately so the next request uses the new profile without a
+    // restart; the persisted file makes it survive the next boot.
+    const effective = optionsOf({ ...(extras.loaderConfig ?? {}), ...readProfileOverrides(dir) })
+    applyFingerprintToClient(adapter.client, effective)
+    state.lastTest = null
+    return status()
+  }
+
   return async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://localhost')
@@ -341,27 +664,66 @@ function createApi(ctx, options, adapter, state) {
         json(res, 200, await setDefault(req))
         return
       }
+      if (path === '/my-model/api/fingerprint' && req.method === 'POST') {
+        json(res, 200, await saveFingerprint(req))
+        return
+      }
       json(res, 404, { error: { code: 'NOT_FOUND', message: 'Unknown My Model endpoint.' } })
     } catch (error) {
       if (error instanceof ApiError) {
         json(res, error.status, { error: { code: error.code, message: error.message } })
         return
       }
-      ctx.logger?.warn?.('my-model: settings API failed')
-      ctx.logger?.warn?.(error)
+      log?.warn?.('my-model: settings API failed')
+      log?.warn?.(error)
       json(res, 500, { error: { code: 'INTERNAL', message: error?.message ?? String(error) } })
     }
   }
 }
 
 export function apply(ctx, config) {
-  const options = optionsOf(config)
+  const loaderConfig = config && typeof config === 'object' ? config : {}
+  const profileDir = profileDirOf(ctx)
+  const logger = fileLogger(ctx.logger, profileDir)
+  logger?.info?.('my-model: logger started')
+  if (!profileDir) {
+    logger?.warn?.(
+      'my-model: could not resolve the profile directory; fingerprint settings from the settings page will not persist (edit the plugin config instead).',
+    )
+  }
+  const startupOverrides = readProfileOverrides(profileDir)
+  // Settings-page overrides win over the loader config for the fields they
+  // contain, mirroring the host's `base` + user-layer composition.
+  const options = optionsOf({ ...loaderConfig, ...startupOverrides })
+  // The built-in fingerprint is a snapshot and goes stale as the browser and
+  // web client update. When no settings-page overrides exist, surface that the
+  // defaults are in use instead of failing silently.
+  if (Object.keys(startupOverrides).length === 0 && options.clientVersion === DEFAULTS.clientVersion) {
+    logger?.warn?.(
+      'my-model: using the built-in browser fingerprint. If your browser or the deployed web client changed, ' +
+        'set userAgent, secChUa, secChUaPlatform and clientVersion in the settings page or plugin config.',
+    )
+  }
   const adapter = new DeepSeekWebAdapter({
     baseURL: options.baseURL,
     timeoutMs: options.timeoutMs,
     clientVersion: options.clientVersion,
+    userAgent: options.userAgent,
+    secChUa: options.secChUa,
+    secChUaPlatform: options.secChUaPlatform,
+    secChUaMobile: options.secChUaMobile,
+    acceptLanguage: options.acceptLanguage,
+    secFetchSite: options.secFetchSite,
+    secFetchMode: options.secFetchMode,
+    secFetchDest: options.secFetchDest,
+    priority: options.priority,
+    referer: options.referer,
+    clientLocale: options.clientLocale,
+    clientPlatform: options.clientPlatform,
+    clientBundleId: options.clientBundleId,
     maxPromptChars: options.maxPromptChars,
-    logger: ctx.logger,
+    maxToolChars: options.maxToolChars,
+    logger,
     resolveToken: () => resolveSecret(ctx, options.tokenEnv),
     resolveCookies: () => resolveSecret(ctx, options.cookiesEnv),
     minTurnGapMs: options.minTurnGapMs,
@@ -369,6 +731,11 @@ export function apply(ctx, config) {
     maxAutoWaitMs: options.maxAutoWaitMs,
     cooldownBaseMs: options.cooldownBaseMs,
     maxCooldownMs: options.maxCooldownMs,
+    humanizePacing: options.humanizePacing,
+    turnGapJitter: options.turnGapJitter,
+    humanLongPauseChance: options.humanLongPauseChance,
+    humanLongPauseMinMs: options.humanLongPauseMinMs,
+    humanLongPauseMaxMs: options.humanLongPauseMaxMs,
   })
 
   ctx.llm.registerAdapter([PROVIDER], adapter)
@@ -379,12 +746,13 @@ export function apply(ctx, config) {
   // in headless profiles that never provide it this callback simply never runs.
   ctx.inject(['webServer'], (httpCtx) => {
     const state = { lastTest: null }
-    const handler = createApi(ctx, options, adapter, state)
+    const handler = createApi(ctx, options, adapter, state, { loaderConfig, profileDir, logger })
     for (const path of [
       '/my-model/api/status',
       '/my-model/api/credentials',
       '/my-model/api/test',
       '/my-model/api/default',
+      '/my-model/api/fingerprint',
     ]) {
       httpCtx.effect(() => httpCtx.webServer.register({ kind: 'exact', path, handler }))
     }

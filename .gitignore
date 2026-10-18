@@ -13,6 +13,9 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Local agent work notes (not part of the plugin)
+.workbuddy-ai/
+
 # Local secrets and env overrides
 .env
 .env.*

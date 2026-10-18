@@ -11,6 +11,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
   const headers = client.baseHeaders('test')
   assert.equal(headers['x-client-version'], '9.9.9')
   assert.equal(headers.referer, 'https://chat.deepseek.com/a/chat/')
+  assert.equal(headers['sec-fetch-site'], 'same-origin')
+  assert.equal(headers['sec-fetch-mode'], 'cors')
+  assert.equal(headers['sec-fetch-dest'], 'empty')
+  assert.equal(headers.priority, 'u=1, i')
 }
 
 function jsonResponse(value, status = 200, headers = {}) {
@@ -30,6 +34,7 @@ function jsonResponse(value, status = 200, headers = {}) {
     maxCooldownMs: 500,
     minCooldownMs: 20,
     jitterRatio: 0,
+    humanizePacing: false,
   })
   const started = Date.now()
   const release1 = await scheduler.acquire()
@@ -54,6 +59,7 @@ function jsonResponse(value, status = 200, headers = {}) {
     maxCooldownMs: 500,
     minCooldownMs: 60,
     jitterRatio: 0,
+    humanizePacing: false,
   })
   scheduler.noteRateLimit(120)
   const started = Date.now()
@@ -72,6 +78,7 @@ function jsonResponse(value, status = 200, headers = {}) {
     maxCooldownMs: 500,
     minCooldownMs: 10,
     jitterRatio: 0,
+    humanizePacing: false,
   })
   scheduler.noteRateLimit(200)
   let error
@@ -97,6 +104,7 @@ function jsonResponse(value, status = 200, headers = {}) {
     maxCooldownMs: 1000,
     minCooldownMs: 10,
     jitterRatio: 0,
+    humanizePacing: false,
   })
   scheduler.noteRateLimit(100)
   assert.ok(scheduler.cooldownRemainingMs > 0)
@@ -229,6 +237,7 @@ function jsonResponse(value, status = 200, headers = {}) {
     cooldownBaseMs: 40,
     maxCooldownMs: 100,
     jitterRatio: 0,
+    humanizePacing: false,
   })
   let creates = 0
   adapter.client = {
@@ -275,6 +284,7 @@ function jsonResponse(value, status = 200, headers = {}) {
     cooldownBaseMs: 100,
     maxCooldownMs: 500,
     jitterRatio: 0,
+    humanizePacing: false,
   })
   let sessions = 0
   let active = 0
@@ -327,6 +337,7 @@ function jsonResponse(value, status = 200, headers = {}) {
     cooldownBaseMs: 50,
     maxCooldownMs: 500,
     jitterRatio: 0,
+    humanizePacing: false,
   })
   let creates = 0
   adapter.client = {
@@ -368,6 +379,7 @@ function jsonResponse(value, status = 200, headers = {}) {
     cooldownBaseMs: 100,
     maxCooldownMs: 500,
     jitterRatio: 0,
+    humanizePacing: false,
   })
   adapter.client = {
     async currentToken() {
@@ -413,6 +425,7 @@ function jsonResponse(value, status = 200, headers = {}) {
     cooldownBaseMs: 100,
     maxCooldownMs: 500,
     jitterRatio: 0,
+    humanizePacing: false,
   })
   adapter.client = {
     async currentToken() {
@@ -448,6 +461,174 @@ function jsonResponse(value, status = 200, headers = {}) {
   )
   assert.equal(chunks.length, 2)
   assert.ok(adapter.gate.cooldownRemainingMs > 0, 'a partial failure still cools down the next turn')
+}
+
+// Human-like pacing (方案A): a long idle is inserted before some turns, but the
+// slot is held so concurrency is still respected. Both branches are checked with
+// a controlled `random` so the test stays deterministic.
+{
+  const pausing = new TurnScheduler({
+    minTurnGapMs: 0,
+    maxAutoWaitMs: 1000,
+    cooldownBaseMs: 50,
+    maxCooldownMs: 500,
+    minCooldownMs: 10,
+    jitterRatio: 0,
+    humanizePacing: true,
+    humanLongPauseChance: 1,
+    humanLongPauseMinMs: 50,
+    humanLongPauseMaxMs: 50,
+    random: () => 0,
+  })
+  const started = Date.now()
+  const release = await pausing.acquire()
+  const waited = Date.now() - started
+  assert.ok(waited >= 40, `pacing pause was applied (${waited}ms)`)
+  release()
+
+  const never = new TurnScheduler({
+    minTurnGapMs: 0,
+    maxAutoWaitMs: 1000,
+    cooldownBaseMs: 50,
+    maxCooldownMs: 500,
+    minCooldownMs: 10,
+    jitterRatio: 0,
+    humanizePacing: true,
+    humanLongPauseChance: 0.5,
+    humanLongPauseMinMs: 5000,
+    humanLongPauseMaxMs: 5000,
+    random: () => 0.99,
+  })
+  const quickStarted = Date.now()
+  const quickRelease = await never.acquire()
+  const quickWaited = Date.now() - quickStarted
+  assert.ok(quickWaited < 1000, `no pause when the roll misses (${quickWaited}ms)`)
+  quickRelease()
+}
+
+// Fingerprint fields are configurable so the request profile can be matched to
+// the browser that issued the login token.
+{
+  const client = new DeepSeekWebClient({
+    token: 'test',
+    userAgent: 'UA-CUSTOM',
+    secChUa: '"Custom";v="1"',
+    secChUaPlatform: '"macOS"',
+    secChUaMobile: '?1',
+    acceptLanguage: 'en-US,en;q=0.9',
+    secFetchSite: 'cross-site',
+    secFetchMode: 'no-cors',
+    secFetchDest: 'document',
+    priority: 'u=4, i',
+    referer: 'https://example.com/x',
+    clientLocale: 'en_US',
+    clientPlatform: 'mac',
+    clientBundleId: 'custom.bundle',
+  })
+  const headers = client.baseHeaders('test')
+  assert.equal(headers['user-agent'], 'UA-CUSTOM')
+  assert.equal(headers['sec-ch-ua'], '"Custom";v="1"')
+  assert.equal(headers['sec-ch-ua-platform'], '"macOS"')
+  assert.equal(headers['sec-ch-ua-mobile'], '?1')
+  assert.equal(headers['accept-language'], 'en-US,en;q=0.9')
+  assert.equal(headers['x-client-locale'], 'en_US')
+  assert.equal(headers['x-client-platform'], 'mac')
+  assert.equal(headers['x-client-bundle-id'], 'custom.bundle')
+  assert.equal(headers['sec-fetch-site'], 'cross-site')
+  assert.equal(headers['sec-fetch-mode'], 'no-cors')
+  assert.equal(headers['sec-fetch-dest'], 'document')
+  assert.equal(headers.priority, 'u=4, i')
+  assert.equal(headers.referer, 'https://example.com/x')
+}
+
+// The session cache is LRU: touching a key refreshes its position so an active
+// conversation is not evicted as "oldest".
+{
+  const adapter = new DeepSeekWebAdapter({ resolveToken: async () => 'test' })
+  for (let i = 0; i < 64; i += 1) {
+    adapter.remember(`k${i}`, { sessionId: `s${i}`, fullPrompt: 'p' }, i + 1)
+  }
+  assert.equal(adapter.sessions.size, 64)
+  adapter.remember('k0', { sessionId: 's0', fullPrompt: 'p' }, 1)
+  adapter.remember('k64', { sessionId: 's64', fullPrompt: 'p' }, 65)
+  assert.equal(adapter.sessions.has('k0'), true, 'a touched session survives')
+  assert.equal(adapter.sessions.has('k1'), false, 'the least-recently-used session is evicted')
+  assert.equal(adapter.sessions.has('k64'), true)
+}
+
+// A 200 HTML challenge page is classified as WAF_CHALLENGE, not UPSTREAM.
+{
+  const client = new DeepSeekWebClient({ token: 'test' })
+  const response = new Response('<html><head><title>Human verification</title></head><body>captcha</body></html>', {
+    status: 200,
+    headers: { 'content-type': 'text/html; charset=utf-8' },
+  })
+  await assert.rejects(client.readJson(response), (error) => {
+    assert.equal(error.code, 'WAF_CHALLENGE')
+    return true
+  })
+}
+
+// Huawei Cloud WAF challenge pages are classified as WAF_CHALLENGE, both via
+// the HTTP error path and the JSON reader.
+{
+  const client = new DeepSeekWebClient({ token: 'test' })
+  const blockedBody = '<html><body>请完成验证 captcha</body></html>'
+  const blocked = new Response(blockedBody, {
+    status: 405,
+    headers: { 'content-type': 'text/html', server: 'CW' },
+  })
+  const error = client.httpError(blocked, blockedBody)
+  assert.equal(error.code, 'WAF_CHALLENGE')
+
+  const challenge = new Response('<html><body>HWWAF 人机验证</body></html>', {
+    status: 200,
+    headers: { 'content-type': 'text/html', server: 'CW' },
+  })
+  await assert.rejects(client.readJson(challenge), (caught) => {
+    assert.equal(caught.code, 'WAF_CHALLENGE')
+    return true
+  })
+}
+
+// Terminal failures are logged so the plugin log shows mute/WAF/quota.
+{
+  const warnings = []
+  const adapter = new DeepSeekWebAdapter({
+    resolveToken: async () => 'test',
+    logger: { warn: (message) => warnings.push(String(message)) },
+    minTurnGapMs: 0,
+    maxAutoWaitMs: 0,
+  })
+  adapter.client = {
+    async currentToken() {
+      return 'test'
+    },
+    async createSession() {
+      throw new AdapterError('DeepSeek Web account is muted', 'ACCOUNT_MUTED')
+    },
+  }
+  await assert.rejects(
+    (async () => {
+      for await (const _chunk of adapter.stream({
+        model: 'deepseek-web-chat',
+        system: 'You are a test.',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+        tools: [],
+        sessionId: 'session-mute',
+      })) {
+        // no chunks expected
+      }
+    })(),
+    (error) => {
+      assert.equal(error.code, 'ACCOUNT_MUTED')
+      return true
+    },
+  )
+  assert.ok(
+    warnings.some((message) => message.includes('terminal failure ACCOUNT_MUTED')),
+    'terminal failure is logged',
+  )
 }
 
 console.log('rate-limit: ok')
