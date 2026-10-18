@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-my-model",
-  "version": "1.4.2",
+  "version": "1.4.4",
   "private": true,
   "type": "module",
   "description": "My Model: a DeepSeek web-account model provider for DeepSeek Harness.",

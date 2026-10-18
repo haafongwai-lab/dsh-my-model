@@ -198,6 +198,41 @@ function staleSessionError(detail, status) {
 }
 
 /**
+ * How long the host waits before its retry after a transient upstream failure.
+ * The plugin's own in-turn retry uses its own backoff; this value only bounds
+ * the host-level retry so it never comes back in a hot loop.
+ */
+const TRANSIENT_RETRY_AFTER_MS = 5000
+
+function transientUpstreamError(detail, status) {
+  return new AdapterError(
+    `DeepSeek Web is temporarily unavailable: ${String(detail ?? '').slice(0, 300)}`,
+    'SERVER',
+    status,
+    { providerRetryAfterMs: TRANSIENT_RETRY_AFTER_MS },
+  )
+}
+
+/**
+ * The upstream is having a transient moment: overloaded, briefly down, or the
+ * classic "service is busy" toast. It arrives as an in-stream error frame (or a
+ * JSON error body) with no HTTP status to key on, so it used to fall through to
+ * terminal `UPSTREAM` and kill an otherwise healthy turn. One retry after a
+ * short wait makes these succeed. Checked only after quota / mute / rate-limit
+ * / stale-session classification, so it cannot swallow a terminal cause.
+ */
+function isTransientUpstreamText(text) {
+  const value = String(text ?? '')
+  if (!value) return false
+  return (
+    /服务器?\s*暂时\s*不可用|服务\s*繁忙|服务器\s*繁忙|系统\s*繁忙|系统开小差|暂时无法(?:处理|完成|使用)|请稍后|稍后(?:再试|重试)|访问人数过多|系统(?:错误|异常)/.test(value) ||
+    /temporarily\s+unavailable|service\s+(?:is\s+)?(?:unavailable|busy)|server\s+(?:is\s+)?busy|internal\s+server\s+error|overloaded|try\s+again\s+later|please\s+try\s+again/i.test(
+      value,
+    )
+  )
+}
+
+/**
  * Some WAFs return a challenge page with HTTP 200 and `text/html` instead of a
  * 4xx. Detect that so it surfaces as `WAF_CHALLENGE` (with the "paste cookies"
  * hint) rather than a generic `UPSTREAM` failure.
@@ -688,12 +723,13 @@ export class DeepSeekWebClient {
     }
     if (code === 40003 || code === 40001 || status === 401 || status === 403) {
       return new AdapterError(
-        `DeepSeek Web rejected the token (${message}). Log in to chat.deepseek.com again and paste a fresh userToken.`,
+        `DeepSeek Web rejected the token (${message}). Log in to chat.deepseek.com again and paste a fresh userToken. If the web account was muted, the rejection persists until the mute lifts — re-login alone will not fix that.`,
         'INVALID_CREDENTIAL',
         status,
       )
     }
     if (isStaleSessionText(message)) return staleSessionError(message, status)
+    if (isTransientUpstreamText(message)) return transientUpstreamError(message, status)
     return new AdapterError(`DeepSeek Web error ${code ?? ''}: ${message}`, 'UPSTREAM', status)
   }
 
@@ -739,13 +775,14 @@ export class DeepSeekWebClient {
     }
     if (status === 401 || status === 403) {
       return new AdapterError(
-        `DeepSeek Web rejected the token (HTTP ${status}). Log in again and paste a fresh userToken. ${detail}`,
+        `DeepSeek Web rejected the token (HTTP ${status}). Log in again and paste a fresh userToken. If the web account was muted, the rejection persists until the mute lifts — re-login alone will not fix that. ${detail}`,
         'INVALID_CREDENTIAL',
         status,
       )
     }
     if (isStaleSessionText(detail)) return staleSessionError(detail, status)
     if (status >= 500) return new AdapterError(`DeepSeek Web server error (HTTP ${status}). ${detail}`, 'SERVER', status)
+    if (isTransientUpstreamText(detail)) return transientUpstreamError(detail, status)
     return new AdapterError(`DeepSeek Web request failed (HTTP ${status}). ${detail}`, 'UPSTREAM', status)
   }
 
@@ -904,6 +941,12 @@ export class DeepSeekWebClient {
   }
 
   *decodeData(data, event, state = {}) {
+    // Record the frame shape (capped) so a turn that ends with no tool call
+    // and no usable answer can be root-caused from the plugin log instead of
+    // a screenshot. Nothing is logged unless the turn looks suspicious.
+    if (Array.isArray(state.rawFrames) && state.rawFrames.length < 40 && data && typeof data === 'object') {
+      state.rawFrames.push(JSON.stringify(data).slice(0, 200))
+    }
     if (!data || typeof data !== 'object') return
     if (typeof data.code === 'number' && data.code !== 0) throw this.codeError(data)
     const bizCode = data.data?.biz_code
@@ -914,6 +957,7 @@ export class DeepSeekWebClient {
       if (isMutedText(detail)) throw new AdapterError(`DeepSeek Web account is muted: ${detail}`, 'ACCOUNT_MUTED')
       if (isRateLimitText(detail)) throw new AdapterError(`DeepSeek Web rate limit: ${detail}`, 'RATE_LIMIT')
       if (isStaleSessionText(detail)) throw staleSessionError(detail)
+      if (isTransientUpstreamText(detail)) throw transientUpstreamError(detail)
       throw new AdapterError(`DeepSeek Web upstream error: ${detail}`, 'UPSTREAM')
     }
     if (event === 'toast' || event === 'hint') {
@@ -927,6 +971,7 @@ export class DeepSeekWebClient {
           throw new AdapterError(`DeepSeek Web rate limit: ${message}`, 'RATE_LIMIT')
         }
         if (isStaleSessionText(message)) throw staleSessionError(message)
+        if (isTransientUpstreamText(message)) throw transientUpstreamError(message)
         throw new AdapterError(`DeepSeek Web rejected the message: ${message}`, 'UPSTREAM')
       }
     }
@@ -1021,8 +1066,9 @@ export class DeepSeekWebClient {
   async *completionStream({ sessionId, parentMessageId, prompt, thinking, search, signal, state }) {
     state ??= {}
     // Per-stream fragment-type state. Kept local so two overlapping streams
-    // cannot corrupt each other's reasoning/text classification.
-    const streamState = {}
+    // cannot corrupt each other's reasoning/text classification. `rawFrames`
+    // is a capped diagnostic ring for the plugin log.
+    const streamState = { rawFrames: [] }
     const body = {
       chat_session_id: sessionId,
       parent_message_id: parentMessageId ?? null,
@@ -1061,7 +1107,6 @@ export class DeepSeekWebClient {
     let text = ''
     const sieve = new StreamSieve()
     const toolCalls = []
-    let finished = false
 
     const emitText = async function* (value) {
       if (!value) return
@@ -1080,10 +1125,7 @@ export class DeepSeekWebClient {
           continue
         }
         if (event.type === 'status') {
-          if (event.status === 'FINISHED') {
-            finished = true
-            break
-          }
+          if (event.status === 'FINISHED') break
           continue
         }
         if (event.type === 'reasoning' && event.text) {
@@ -1106,11 +1148,57 @@ export class DeepSeekWebClient {
           if (toolCalls.length > 0) break
         }
       }
-      if (!finished) {
-        for (const item of sieve.flush()) {
-          if (item.type === 'text') yield* emitText(item.text)
-          else if (item.type === 'tools') toolCalls.push(...item.calls)
+      // Always drain the sieve, even after a FINISHED status: the status can
+      // break the read loop while a DSML block is still mid-capture, and
+      // dropping it would silently truncate the answer or lose a tool call
+      // that sits at the very end of the turn.
+      for (const item of sieve.flush()) {
+        if (item.type === 'text') yield* emitText(item.text)
+        else if (item.type === 'tools') toolCalls.push(...item.calls)
+      }
+
+      // A thinking-mode stream can end with the whole turn routed into the
+      // reasoning channel and an empty answer — the fragment-type switch was
+      // missed, or the model drafted everything inside its head. Without this
+      // the turn "completes" with a blank answer and no action taken, which
+      // looks exactly like the plugin doing nothing. Recover the tool calls
+      // from the reasoning so the requested action still runs. The reasoning
+      // text itself is already visible to the user, so it is not re-emitted.
+      if (!text.trim() && reasoning.trim() && toolCalls.length === 0) {
+        const recovered = parseDsmlToolCalls(reasoning)
+        if (recovered.calls.length > 0) {
+          this.logger?.warn?.(
+            `my-model: answer channel was empty; recovered ${recovered.calls.length} tool call(s) from the reasoning channel`,
+          )
+          toolCalls.push(...recovered.calls)
         }
+      }
+
+      // A call can also leak into the answer as raw markup when the streaming
+      // sieve could not recognise the fence spelling the model used (a spaced
+      // `<| DSML | invoke …>` variant, for example). The markup is already
+      // visible to the user, but running the action still beats delivering
+      // protocol text and no result.
+      if (toolCalls.length === 0 && /<\|?\s*DSML|invoke\s+name\s*=|<!\[CDATA\[/i.test(text)) {
+        const recovered = parseDsmlToolCalls(text)
+        if (recovered.calls.length > 0) {
+          this.logger?.warn?.(
+            `my-model: answer carried unparsed DSML markup; recovered ${recovered.calls.length} tool call(s) from the answer text`,
+          )
+          toolCalls.push(...recovered.calls)
+        }
+      }
+
+      // Diagnostic: a turn that ends with neither a tool call nor usable text
+      // is otherwise invisible — the UI just shows "已完成" with an empty
+      // answer. Record the frame shape so the next occurrence is root-caused
+      // from the log, not from a screenshot.
+      if (toolCalls.length === 0 && (!text.trim() || /<\|?\s*DSML|invoke\s+name\s*=|<!\[CDATA\[/i.test(text))) {
+        const frames = JSON.stringify((streamState.rawFrames ?? []).slice(0, 30))
+        this.logger?.warn?.(
+          `my-model: suspicious completion: no tool call, answer ${text.length} chars` +
+            `${text.trim() ? `: ${text.slice(0, 160)}` : ' (empty)'}; frames: ${frames}`,
+        )
       }
 
       if (reasoningOpen) {

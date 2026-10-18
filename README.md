@@ -75,6 +75,12 @@ way instead of firing every Harness request at it:
 - **PoW retry.** A rejected proof-of-work challenge is re-solved once
   automatically (a challenge can expire between fetch and use), instead of
   failing the turn.
+- **Transient upstream retry.** Overload/busy answers that arrive as an
+  in-stream error frame (`服务器暂时不可用`, `service is busy`, `overloaded`,
+  …) carry no HTTP status, so they are classified `SERVER` and retried in-turn
+  once (about 1–2 s backoff; the host retries after 5 s) instead of failing an
+  otherwise healthy turn. The retry is skipped once output has started, so
+  visible text is never duplicated.
 - **Terminal classification.** Quota exhaustion (`QUOTA`) and a muted account
   (`ACCOUNT_MUTED`) are reported separately and are not retried.
 - **No duplicate output.** A failure after the first streamed chunk is a
@@ -112,6 +118,22 @@ credential shapes (`sk-…`, `Bearer …`, `api_key=…`, `password=…`, `token
 redacted before it is replayed. File paths are preserved because the model needs
 them to act. Lower `maxToolChars` if large command outputs should not dominate a
 turn.
+
+A thinking-mode stream that ends with the whole turn inside the reasoning
+channel and an empty answer — the model drafted its tool call in its thinking
+and the fragment-type switch was missed — is healed: the calls are parsed back
+out of the reasoning and executed, and the plugin log records
+`answer channel was empty; recovered N tool call(s) from the reasoning
+channel`. A fence spelling the streaming sieve does not recognise (a spaced
+`<| DSML | invoke …>` variant) is recovered from the answer text the same way
+(`recovered N tool call(s) from the answer text`). The reasoning text itself is
+already visible to the user, so it is not re-emitted as the answer.
+
+When a turn ends with neither a tool call nor usable text — which the UI would
+otherwise show as a plain "已完成" with an empty answer — the plugin log
+records a `suspicious completion` line with the answer length, a snippet, and
+the raw upstream frames (capped), so the next occurrence can be root-caused
+from the log.
 
 ## Config
 
@@ -194,14 +216,57 @@ Operational rules that code cannot enforce:
 - The system prompt no longer announces the tool protocol; do not re-add phrases
   such as "function-calling field" or "OpenAI-style".
 
+### Transport layer (TLS) — measured ceiling
+
+The Node runtime generates the TLS handshake itself and `fetch` exposes no
+knobs for it. Measured with `node tools/tls-probe.mjs` on this machine
+(plugin node v22, OpenSSL 3.5 vs Chrome 155):
+
+| Aspect | This plugin (Node) | Chrome 155 | Changeable from JS? |
+| --- | --- | --- | --- |
+| Offered ciphers | 52 | 16 (GREASE first) | only via a custom dispatcher |
+| Extensions | 11, different order, no GREASE | 16, GREASE first | no — OpenSSL emits them |
+| `encrypt_then_mac` / `extended_master_secret` | sent | not sent | no |
+| SCT / `status_request` / `compress_certificate` | absent | sent | no |
+| Supported groups | PQC `4588` first, 8 total | X25519, P-256, P-384 | no from `fetch` |
+| key_share | PQC + X25519 | X25519 + P-256 | no |
+| HTTP version | `http/1.1` (verified: undici fetch ALPN) | `h2` | no without an `undici` dispatcher |
+
+The request path is the DSH-installed global dispatcher (proxy per environment
+variables), and `fetch` accepts neither TLS options nor an HTTP/2 toggle, so
+**nothing below the HTTP byte level can be changed in this plugin without
+changing transport strategy**. Verified earlier in this cycle: unauthenticated
+endpoints answer `{"code":40002,"msg":"Missing Token"}` instead of a WAF
+challenge — the risk control in front of `chat.deepseek.com` was not gating on
+the TLS fingerprint at that time.
+
+If that changes, the only fidelity-restoring moves, in order of cost:
+
+1. An `undici` dispatcher with `allowH2` (fixes only the h1/h2 bit; adds a
+   runtime dependency and duplicates DSH's proxy-env logic).
+2. Rewrite the client on `node:https` with a pinned `Agent`
+   (`ciphers`/`ecdhCurve`/`sigalgs` — the probe prints what actually changes;
+   still no GREASE, no SCT, no extension-order control, HTTP/1.1 only).
+3. A `curl-impersonate` / Go `uTLS` sidecar on localhost — full ClientHello
+   clone, but an external binary to build, ship, and keep updated.
+4. Drive the user's real Chrome over CDP — the only option where the TLS stack
+   is not a forgery but the browser itself (requires Chrome running with a
+   debug port, and a fallback path when it is not).
+
+Until the upstream rejects the Node handshake directly, options 1–3 buy
+cosmetic JA3 proximity at the price of new failure modes; the probe is kept
+as the regression detector — re-run it after any transport change, and watch
+for `{"code":40002}` turning into challenge HTML from this same Node stack.
+
 ## Logs
 
 The desktop app does not persist the host's stdout, so the plugin appends its
 own warnings and errors to `<profile>/my-model.log` (rotated to `.1` at 1 MB).
 For the `desktop` profile that is
 `~/.dsh/profiles/desktop/my-model.log`. It records rate limits, WAF challenges,
-PoW retries, session recoveries (`retrying DeepSeek Web call after
-STALE_SESSION`), fingerprint warnings, and every stopping cause (`terminal
+PoW retries, session recoveries and transient-upstream retries (`retrying
+DeepSeek Web call after STALE_SESSION` / `… after SERVER`), fingerprint
+warnings, and every stopping cause (`terminal
 failure ACCOUNT_MUTED`, `terminal failure WAF_CHALLENGE`, `terminal failure
 QUOTA`, `terminal failure RATE_LIMIT`, …), and the same messages still go to the
 host logger when one is attached. Open it in any editor, or watch it with
@@ -219,6 +284,7 @@ after the next successful turn.
 - `deepseek-web.js` — HTTP/SSE client and `LlmAdapter`.
 - `dsml.js` — tool protocol, parser, stream sieve, prompt builder.
 - `pow.js` + `sha3_wasm_bg.wasm` — DeepSeekHashV1 proof-of-work solver.
+- `tools/tls-probe.mjs` — offline ClientHello fingerprint probe (dev only).
 
 ## Attribution
 
@@ -242,3 +308,7 @@ npm test
 
 `npm test` runs the self test, stream/host/UI smoke tests, and the rate-limit
 scheduling/classification tests.
+
+`node tools/tls-probe.mjs` captures this machine's real TLS ClientHello and
+diffs it against the Chrome reference (see *Transport layer*). It is offline
+and dev-only; `tools/` is not part of the bundle (`files` in `package.json`).
