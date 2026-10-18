@@ -484,6 +484,7 @@ function createApi(ctx, options, adapter, state, extras = {}) {
         persistable: Boolean(extras.profileDir),
       },
       lastTest: state.lastTest,
+      lastFailure: adapter.lastFailure ?? null,
     }
   }
 

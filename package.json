@@ -1,11 +1,11 @@
 {
   "name": "@local/dsh-my-model",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "private": true,
   "type": "module",
   "description": "My Model: a DeepSeek web-account model provider for DeepSeek Harness.",
   "scripts": {
-    "test": "node test/selftest.mjs && node test/stream-smoke.mjs && node test/host-smoke.mjs && node test/ui-smoke.mjs && node test/rate-limit.mjs"
+    "test": "node test/selftest.mjs && node test/stream-smoke.mjs && node test/host-smoke.mjs && node test/ui-smoke.mjs && node test/rate-limit.mjs && node test/recovery.mjs"
   },
   "exports": {
     ".": "./index.js",

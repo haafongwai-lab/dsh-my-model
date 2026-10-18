@@ -65,6 +65,8 @@ window.__ModuleLoader__.load({
       'source.managed': 'Harness 凭据库',
       'source.environment': '环境变量',
       'lastTest.fail': '上次测试失败',
+      'lastFailure.label': '上次失败原因',
+      'lastFailure.hint': '完整记录见 profile 目录下的 my-model.log',
       loading: '正在读取状态…',
     }
 
@@ -129,6 +131,8 @@ window.__ModuleLoader__.load({
       'source.managed': 'Harness credential store',
       'source.environment': 'Environment variable',
       'lastTest.fail': 'Last test failed',
+      'lastFailure.label': 'Last failure',
+      'lastFailure.hint': 'The full history lives in my-model.log under the profile directory.',
       loading: 'Loading status…',
     }
 
@@ -206,6 +210,7 @@ window.__ModuleLoader__.load({
 .dsh-mm-modelName{font-size:13px;font-weight:500;line-height:20px}
 .dsh-mm-modelDesc{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
 .dsh-mm-savedNotice{color:var(--dsw-alias-state-success-primary);font-size:12px;line-height:18px;margin:0}
+.dsh-mm-lastFailure{color:var(--dsw-alias-state-warn-label);font-size:12px;line-height:18px;margin:0}
 .dsh-mm-error{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px;margin:0}
 .dsh-mm-messageLine{align-items:center;display:flex;flex-wrap:wrap;gap:4px}
 .dsh-mm-notice{color:var(--dsw-alias-state-warn-label);font-size:12px;line-height:18px;margin:0}
@@ -421,6 +426,15 @@ window.__ModuleLoader__.load({
           return ''
         }
 
+        const formatTime = (ms) => {
+          if (!Number.isFinite(ms)) return ''
+          try {
+            return new Date(ms).toLocaleString()
+          } catch {
+            return ''
+          }
+        }
+
         return h(
           'section',
           { className: 'dsh-mm-section', 'aria-label': t('title') },
@@ -471,6 +485,15 @@ window.__ModuleLoader__.load({
                   tokenConfigured && sourceText(status?.token) ? ` · ${sourceText(status?.token)}` : ''
                 } · ${t('account.desc')}`,
               ),
+              status?.lastFailure
+                ? h(
+                    'p',
+                    { className: 'dsh-mm-lastFailure' },
+                    `${t('lastFailure.label')}：${status.lastFailure.code} · ${status.lastFailure.message}${
+                      formatTime(status.lastFailure.at) ? `（${formatTime(status.lastFailure.at)}）` : ''
+                    } — ${t('lastFailure.hint')}`,
+                  )
+                : null,
               h(
                 'div',
                 { className: 'dsh-mm-editor' },

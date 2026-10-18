@@ -57,7 +57,13 @@ way instead of firing every Harness request at it:
   queue behind one account slot, with a short gap between turn starts.
 - **Session reuse.** A conversation keeps its `chat.deepseek.com` session for
   up to 12 hours, so a continuing turn sends only the new tail instead of
-  rebuilding the whole transcript in a fresh session.
+  rebuilding the whole transcript in a fresh session. The cache key includes the
+  Harness session, the web model, and the token, so switching to another
+  provider (for example the official API) and back reuses the same web
+  conversation instead of dropping it.
+- **Stale session recovery.** If the upstream rejects a reused session because
+  it expired or was deleted while you were away, the turn is retried once with a
+  freshly created session (`STALE_SESSION`) instead of failing.
 - **Cheaper session creation.** A new chat session is created with a bare
   request; the PoW challenge is spent only on the completion call. If an older
   upstream still requires PoW for session creation, the client detects it once
@@ -194,10 +200,17 @@ The desktop app does not persist the host's stdout, so the plugin appends its
 own warnings and errors to `<profile>/my-model.log` (rotated to `.1` at 1 MB).
 For the `desktop` profile that is
 `~/.dsh/profiles/desktop/my-model.log`. It records rate limits, WAF challenges,
-PoW retries, fingerprint warnings, and terminal failures (`terminal failure
-ACCOUNT_MUTED`, `terminal failure WAF_CHALLENGE`, `terminal failure QUOTA`, …),
-and the same messages still go to the host logger when one is attached. Open it in any editor, or watch it with
+PoW retries, session recoveries (`retrying DeepSeek Web call after
+STALE_SESSION`), fingerprint warnings, and every stopping cause (`terminal
+failure ACCOUNT_MUTED`, `terminal failure WAF_CHALLENGE`, `terminal failure
+QUOTA`, `terminal failure RATE_LIMIT`, …), and the same messages still go to the
+host logger when one is attached. Open it in any editor, or watch it with
 `tail -f` (Git Bash) / `Get-Content -Wait` (PowerShell).
+
+The settings page mirrors the last failure on the account card as
+`上次失败原因：<CODE> · <message>`, so a disconnect that happened while Harness
+was busy has a visible reason without opening the log. The line clears itself
+after the next successful turn.
 
 ## Files
 

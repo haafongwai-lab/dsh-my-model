@@ -171,4 +171,29 @@ assert.equal(
 )
 assert.match(textOf(withFingerprint), /浏览器指纹/)
 
+// A reported failure is surfaced on the account card so a silent disconnect
+// has a visible cause, and disappears again once the status clears it.
+stateQueue = [
+  {
+    provider: { id: 'deepseek-web', active: true },
+    token: { configured: true, source: 'managed' },
+    cookies: { configured: false },
+    models: [
+      { id: 'deepseek-web-chat', name: 'DeepSeek Web · Chat', description: 'chat', thinking: false, search: false, routable: true },
+    ],
+    defaultSelection: { provider: 'deepseek-web', model: 'deepseek-web-chat' },
+    lastFailure: { code: 'STALE_SESSION', message: 'starting a fresh session.', at: 1792313830728 },
+    lastTest: null,
+  },
+  '',
+  '',
+  '',
+  null,
+]
+stateIndex = 0
+const withFailure = section()
+assert.match(textOf(withFailure), /上次失败原因：STALE_SESSION/)
+assert.match(textOf(withFailure), /starting a fresh session\./)
+assert.match(textOf(withFailure), /my-model\.log/)
+
 console.log('ui-smoke: ok')

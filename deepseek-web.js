@@ -86,8 +86,13 @@ const MODEL_BY_ID = new Map(MODELS.map((model) => [model.id, model]))
  */
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000
 
-/** Transient failures worth retrying inside one turn without asking upstream. */
-const INTERNAL_RETRY_CODES = new Set(['EMPTY_RESPONSE', 'SERVER', 'TIMEOUT', 'TRANSPORT'])
+/**
+ * Transient failures worth retrying inside one turn without asking upstream.
+ * `STALE_SESSION` is self-inflicted and cheap to heal: the retry drops the
+ * cached chat session and starts a fresh one, which is exactly what a session
+ * the server already dropped or expired needs.
+ */
+const INTERNAL_RETRY_CODES = new Set(['EMPTY_RESPONSE', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'STALE_SESSION'])
 
 /**
  * Adapter failure carrying the provider-neutral `code` the Harness routes on.
@@ -163,6 +168,33 @@ function isMutedText(text) {
 
 function isRateLimitText(text) {
   return /rate[\s_-]*limit|too[\s_-]+many[\s_-]+requests|throttl|频繁|频率|限流|请求过多|访问过快/i.test(text)
+}
+
+/**
+ * The server refused a completion because the chat session this turn reused is
+ * no longer usable (expired, deleted, or invalidated while the user was away or
+ * busy in another model). Detectable as `UPSTREAM` today, which is not retried
+ * anywhere — so one stale cache entry permanently killed the provider until the
+ * adapter was reloaded.
+ */
+function isStaleSessionText(text) {
+  const value = String(text ?? '')
+  if (!value) return false
+  return (
+    /(会话|对话)[^\n。；;]{0,12}(不存在|已过期|已经过期|已删除|已失效|失效|无效|异常|不存在)/.test(value) ||
+    /(不存在|找不到|无法找到|无效)[^\n。；;]{0,10}(会话|对话|chat[\s_-]?session)/.test(value) ||
+    /chat[\s_-]?session[\s_-]?id?[^\n。；;]{0,16}(不存在|无效|错误|异常)/.test(value) ||
+    /(?:chat[\s_-]?)?session[^\n]{0,12}(?:not found|not exist|invalid|expired|deleted|不存在)/i.test(value)
+  )
+}
+
+function staleSessionError(detail, status) {
+  const message = String(detail ?? '').slice(0, 300)
+  return new AdapterError(
+    `DeepSeek Web rejected the cached chat session (${message || 'no detail'}); starting a fresh session.`,
+    'STALE_SESSION',
+    status,
+  )
 }
 
 /**
@@ -661,6 +693,7 @@ export class DeepSeekWebClient {
         status,
       )
     }
+    if (isStaleSessionText(message)) return staleSessionError(message, status)
     return new AdapterError(`DeepSeek Web error ${code ?? ''}: ${message}`, 'UPSTREAM', status)
   }
 
@@ -711,6 +744,7 @@ export class DeepSeekWebClient {
         status,
       )
     }
+    if (isStaleSessionText(detail)) return staleSessionError(detail, status)
     if (status >= 500) return new AdapterError(`DeepSeek Web server error (HTTP ${status}). ${detail}`, 'SERVER', status)
     return new AdapterError(`DeepSeek Web request failed (HTTP ${status}). ${detail}`, 'UPSTREAM', status)
   }
@@ -879,6 +913,7 @@ export class DeepSeekWebClient {
       if (isQuotaText(detail)) throw new AdapterError(`DeepSeek Web quota is exhausted: ${detail}`, 'QUOTA')
       if (isMutedText(detail)) throw new AdapterError(`DeepSeek Web account is muted: ${detail}`, 'ACCOUNT_MUTED')
       if (isRateLimitText(detail)) throw new AdapterError(`DeepSeek Web rate limit: ${detail}`, 'RATE_LIMIT')
+      if (isStaleSessionText(detail)) throw staleSessionError(detail)
       throw new AdapterError(`DeepSeek Web upstream error: ${detail}`, 'UPSTREAM')
     }
     if (event === 'toast' || event === 'hint') {
@@ -891,6 +926,7 @@ export class DeepSeekWebClient {
         if (String(reason) === 'rate_limit_reached' || isRateLimitText(message)) {
           throw new AdapterError(`DeepSeek Web rate limit: ${message}`, 'RATE_LIMIT')
         }
+        if (isStaleSessionText(message)) throw staleSessionError(message)
         throw new AdapterError(`DeepSeek Web rejected the message: ${message}`, 'UPSTREAM')
       }
     }
@@ -1203,6 +1239,9 @@ export class DeepSeekWebAdapter {
     this.maxToolChars = Math.max(500, Number(maxToolChars) || 8000)
     this.logger = logger
     this.sessions = new Map()
+    // Last reason a turn stopped, surfaced by the settings page so a silent
+    // disconnect has a visible cause. Cleared by the next successful turn.
+    this.lastFailure = null
     this.gate = new TurnScheduler({
       maxConcurrentTurns,
       minTurnGapMs,
@@ -1351,6 +1390,9 @@ export class DeepSeekWebAdapter {
           this.remember(cacheKey, plan, state.responseMessageId)
         }
         this.gate.noteSuccess()
+        // A completed turn clears the failure the settings page reports, so the
+        // "last failure" line only ever names a reason that is still relevant.
+        this.lastFailure = null
         return
       } catch (error) {
         lastError = error
@@ -1369,10 +1411,16 @@ export class DeepSeekWebAdapter {
           !retryableFailure ||
           error?.fromGate === true
         if (stopping) {
-          // Log terminal failures (mute, WAF, quota, credential) so the plugin
-          // log shows why the turn stopped; rate limits already log their own.
-          if (error instanceof AdapterError && error.code !== 'ABORTED' && error.code !== 'RATE_LIMIT') {
+          // Log every stopping cause so the plugin log shows why the turn ended.
+          // A rate limit that survives the retry budget is just as much a reason
+          // as a mute or a rejected token.
+          if (error instanceof AdapterError && error.code !== 'ABORTED') {
             this.logger?.warn?.(`my-model: terminal failure ${error.code}: ${error.message}`)
+            this.lastFailure = {
+              code: error.code,
+              message: String(error.message).slice(0, 300),
+              at: Date.now(),
+            }
           }
           // Once output has started, a host-level retry would duplicate text;
           // report a terminal stream interruption instead.
