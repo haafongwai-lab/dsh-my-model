@@ -137,51 +137,53 @@ window.__ModuleLoader__.load({
     }
 
     // Visual language mirrors the built-in Models section of Harness settings:
-    // 720px column, 16/24 section title, 12px-radius row cards, pill buttons,
-    // 8px state dots, and the same alias tokens for light/dark themes.
+    // Matches the current Harness settings design system: 720px column,
+    // 16/24 title, 20px-radius row cards, 12px-radius buttons/inputs,
+    // 2px focus rings, and the same alias/radius tokens for both themes.
     const CSS = `
 .dsh-mm-section{max-width:720px;display:flex;flex-direction:column;gap:12px;color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px}
 .dsh-mm-title{margin:0;font-size:16px;font-weight:500;line-height:24px}
 .dsh-mm-intro{margin:0;color:var(--dsw-alias-label-tertiary);font-size:14px;line-height:22px}
-.dsh-mm-rows{display:flex;flex-direction:column;gap:8px;margin:0;padding:0;list-style:none}
-.dsh-mm-card{border:1px solid var(--dsw-alias-border-l2);border-radius:12px;display:flex;flex-direction:column;gap:12px;padding:12px 14px}
+.dsh-mm-rows{display:flex;flex-direction:column;gap:8px;margin:12px 0 0;padding:0;list-style:none}
+.dsh-mm-card{border:.5px solid var(--dsw-alias-settings-card-stroke,var(--dsw-alias-border-l4));background:var(--dsw-alias-settings-card-fill,var(--dsw-alias-bg-layer-2));border-radius:var(--dsw-radius-xl,20px);display:flex;flex-direction:column;gap:12px;padding:12px 14px}
 .dsh-mm-rowHead{display:flex;align-items:center;gap:10px;min-height:22px}
 .dsh-mm-name{font-size:14px;font-weight:500;line-height:22px}
 .dsh-mm-rowMeta{margin-left:auto;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;text-align:right}
-.dsh-mm-tag{border:1px solid var(--dsw-alias-border-l3);border-radius:4px;color:var(--dsw-alias-label-secondary);flex:none;padding:1px 6px;font-size:11px;line-height:16px}
-.dsh-mm-dot{background:var(--dsw-alias-label-dimmed);border-radius:50%;flex:none;width:8px;height:8px}
+.dsh-mm-tag{border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-xs,4px);color:var(--dsw-alias-label-secondary);flex:none;padding:1px 6px;font-size:11px;line-height:16px}
+.dsh-mm-dot{background:var(--dsw-alias-label-dimmed);corner-shape:round;border-radius:50%;flex:none;width:8px;height:8px}
 .dsh-mm-dot.on{background:var(--dsw-alias-state-success-primary)}
 .dsh-mm-dot.off{background:var(--dsw-alias-state-error-primary)}
 .dsh-mm-rowDesc{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
-.dsh-mm-editor{background:var(--dsw-alias-bg-module-platform);border-radius:12px;display:flex;flex-direction:column;gap:14px;padding:14px 16px}
+.dsh-mm-editor{background:var(--dsw-alias-bg-module-platform);border-radius:var(--dsw-radius-lg,16px);display:flex;flex-direction:column;gap:14px;padding:14px 16px}
 .dsh-mm-field{display:flex;flex-direction:column;gap:6px;min-width:0}
 .dsh-mm-fieldHead{display:flex;align-items:center;gap:8px}
 .dsh-mm-fieldLabel{color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:500;line-height:18px}
 .dsh-mm-spacer{flex:1}
-.dsh-mm-input{background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);border-radius:8px;box-sizing:border-box;color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;height:32px;line-height:22px;padding:0 10px;width:100%}
+.dsh-mm-input{background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md,12px);box-sizing:border-box;color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;height:32px;line-height:22px;padding:0 10px;width:100%}
 .dsh-mm-input::placeholder{color:var(--dsw-alias-label-dimmed)}
-.dsh-mm-input:focus{border-color:var(--dsw-alias-brand-primary);outline:none}
+.dsh-mm-input:focus{border-color:var(--dsw-alias-state-business-primary);outline:none}
 .dsh-mm-input:disabled{opacity:.6;cursor:default}
-.dsh-mm-textarea{background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);border-radius:8px;box-sizing:border-box;color:var(--dsw-alias-label-primary);font-family:var(--ds-font-family-code);font-size:12px;line-height:18px;min-height:64px;padding:6px 10px;resize:vertical;width:100%}
+.dsh-mm-textarea{background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md,12px);box-sizing:border-box;color:var(--dsw-alias-label-primary);font-family:var(--ds-font-family-code);font-size:12px;line-height:18px;min-height:64px;padding:6px 10px;resize:vertical;width:100%}
 .dsh-mm-textarea::placeholder{color:var(--dsw-alias-label-dimmed)}
-.dsh-mm-textarea:focus{border-color:var(--dsw-alias-brand-primary);outline:none}
-.dsh-mm-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.dsh-mm-textarea:focus{border-color:var(--dsw-alias-state-business-primary);outline:none}
+.dsh-mm-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
 /* One control system for every button on the page. The shared base fixes the
    box model, kills inherited transforms/filters/animation, and limits motion to
    colour only — so no state can ever resize or nudge a control. */
-.dsh-mm-button,.dsh-mm-link{-webkit-appearance:none;appearance:none;box-sizing:border-box;margin:0;border:1px solid transparent;background-color:transparent;background-image:none;color:var(--dsw-alias-label-primary);font:inherit;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;text-align:center;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;transform:none;filter:none;animation:none;will-change:auto;transition:background-color .12s ease,border-color .12s ease,color .12s ease,opacity .12s ease}
-.dsh-mm-button{height:36px;padding:0 16px;border-radius:18px;border-color:var(--dsw-alias-border-l2);gap:6px;font-size:14px;font-weight:500;line-height:20px}
+.dsh-mm-button,.dsh-mm-link{-webkit-appearance:none;appearance:none;box-sizing:border-box;margin:0;border:0;background-color:transparent;background-image:none;color:var(--dsw-alias-label-primary);font:inherit;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;text-align:center;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;transform:none;filter:none;animation:none;will-change:auto;transition:background-color .12s ease,border-color .12s ease,color .12s ease,opacity .12s ease}
+.dsh-mm-button{height:36px;padding:0 14px;border-radius:var(--dsw-radius-md,12px);gap:4px;font-size:14px;line-height:22px}
+.dsh-mm-button:not(.primary):not(.danger){border:.5px solid var(--dsw-alias-border-l3)}
 .dsh-mm-button:hover:not(:disabled){background-color:var(--dsw-alias-interactive-bg-hover-solid)}
 .dsh-mm-button:active:not(:disabled){background-color:var(--dsw-alias-interactive-bg-hover-solid)}
-.dsh-mm-button.primary{background-color:var(--dsw-alias-button-primary-fill);border-color:transparent;color:var(--dsw-alias-label-primary-foreground)}
+.dsh-mm-button.primary{background-color:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground)}
 .dsh-mm-button.primary:hover:not(:disabled),.dsh-mm-button.primary:active:not(:disabled){background-color:var(--dsw-alias-button-primary-hover)}
-.dsh-mm-button.danger{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-state-error-primary)}
+.dsh-mm-button.danger{color:var(--dsw-alias-state-error-primary)}
 .dsh-mm-button.danger:hover:not(:disabled),.dsh-mm-button.danger:active:not(:disabled){background-color:var(--dsw-alias-interactive-bg-hover-danger)}
 .dsh-mm-button:disabled{cursor:default;opacity:.4}
-.dsh-mm-link{height:24px;padding:0 8px;border-radius:6px;gap:4px;color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:500;line-height:18px}
+.dsh-mm-link{height:28px;padding:0 10px;border-radius:var(--dsw-radius-sm,8px);gap:4px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
 .dsh-mm-link:hover:not(:disabled){background-color:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
 .dsh-mm-link:disabled{cursor:default;opacity:.4}
-.dsh-mm-button:focus-visible,.dsh-mm-link:focus-visible,.dsh-mm-summary:focus-visible{box-shadow:none;outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
+.dsh-mm-button:focus-visible,.dsh-mm-link:focus-visible,.dsh-mm-summary:focus-visible{box-shadow:0 0 0 var(--dsw-focus-ring-width,2px) var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline:none}
 /* Defence in depth: host stylesheets sometimes attach a lift/filter/animation
    to every interactive element. Re-assert the neutral state on every pseudo
    class so a hover can never produce a 1px jump. */
@@ -197,17 +199,17 @@ window.__ModuleLoader__.load({
 .dsh-mm-section .dsh-mm-summary,
 .dsh-mm-section .dsh-mm-summary:hover{transform:none;filter:none;animation:none;will-change:auto}
 .dsh-mm-hint{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
-.dsh-mm-details{border-top:1px solid var(--dsw-alias-border-l2);padding-top:10px}
-.dsh-mm-summary{align-items:center;border:1px solid transparent;border-radius:6px;color:var(--dsw-alias-label-secondary);cursor:pointer;display:flex;font-size:12px;font-weight:500;gap:6px;line-height:18px;list-style:none;margin-left:-6px;padding:2px 6px;width:fit-content;transform:none;filter:none;animation:none;transition:background-color .12s ease,color .12s ease}
+.dsh-mm-details{border-top:.5px solid var(--dsw-alias-border-l2);padding-top:10px}
+.dsh-mm-summary{align-items:center;border:0;border-radius:var(--dsw-radius-sm,8px);color:var(--dsw-alias-label-secondary);cursor:pointer;display:flex;font-size:12px;font-weight:500;gap:6px;line-height:18px;list-style:none;margin-left:-4px;padding:2px 4px;width:fit-content;transform:none;filter:none;animation:none;transition:background-color .12s ease,color .12s ease}
 .dsh-mm-summary::-webkit-details-marker{display:none}
 .dsh-mm-summary::before{border-bottom:1.5px solid;border-right:1.5px solid;content:"";height:5px;transform:rotate(-45deg) translate(-1px,-1px);transition:transform .12s;width:5px}
 .dsh-mm-details[open]>.dsh-mm-summary::before{transform:rotate(45deg) translate(-1px,-1px)}
-.dsh-mm-summary:hover{background-color:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.dsh-mm-summary:hover{color:var(--dsw-alias-label-primary)}
 .dsh-mm-steps{color:var(--dsw-alias-label-tertiary);display:flex;flex-direction:column;font-size:12px;gap:4px;line-height:18px;margin:8px 0 0;padding-left:18px}
 .dsh-mm-modelList{display:flex;flex-direction:column;gap:6px;list-style:none;margin:0;padding:0}
-.dsh-mm-modelRow{border:1px solid var(--dsw-alias-border-l2);border-radius:8px;display:grid;gap:10px;grid-template-columns:8px minmax(0,1fr);padding:8px 10px}
+.dsh-mm-modelRow{border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-lg,16px);display:grid;gap:10px;grid-template-columns:8px minmax(0,1fr);padding:8px 10px}
 .dsh-mm-modelRow>.dsh-mm-dot{margin-top:7px}
-.dsh-mm-modelName{font-size:13px;font-weight:500;line-height:20px}
+.dsh-mm-modelName{font-size:14px;font-weight:500;line-height:22px}
 .dsh-mm-modelDesc{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
 .dsh-mm-savedNotice{color:var(--dsw-alias-state-success-primary);font-size:12px;line-height:18px;margin:0}
 .dsh-mm-lastFailure{color:var(--dsw-alias-state-warn-label);font-size:12px;line-height:18px;margin:0}
@@ -217,6 +219,33 @@ window.__ModuleLoader__.load({
 @media (max-width:560px){.dsh-mm-card{padding:12px}.dsh-mm-editor{padding:12px}.dsh-mm-rowMeta{display:none}}
 @media (prefers-reduced-motion:reduce){.dsh-mm-summary::before{transition:none}}
 `
+
+    // The settings shell maps section ids to a fixed set of glyphs and falls
+    // back to the Settings gear for every other id, which would make "My Model"
+    // look like a second Settings entry. Carry the section glyph in the nav
+    // label instead and hide the fallback gear for that row. The glyph is the
+    // whale emoji itself (U+1F40B), rendered by the system emoji font.
+    const NAV_CSS = `
+nav button:has(.dsh-mm-navGlyph)>svg{display:none}
+.dsh-mm-navLabel{align-items:center;display:inline-flex;gap:8px;min-width:0}
+.dsh-mm-navGlyph{align-items:center;display:inline-flex;flex:none;font-family:"Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif;font-size:14px;justify-content:center;line-height:1;width:16px;height:16px}
+`
+
+    function renderSectionLabel(t) {
+      return         h(
+          'span',
+          { className: 'dsh-mm-navLabel' },
+          h(
+            'span',
+            {
+              className: 'dsh-mm-navGlyph',
+              'aria-hidden': 'true',
+            },
+            '\u{1F40B}',
+          ),
+          h('span', { className: 'dsh-mm-navText' }, t('section.label')),
+        )
+    }
 
     const FINGERPRINT_FIELDS = [
       { key: 'userAgent', label: 'fingerprint.userAgent' },
@@ -724,13 +753,22 @@ window.__ModuleLoader__.load({
           return value === key ? fallback[key] ?? key : value
         }
         const Section = createSection(t)
+        if (typeof document !== 'undefined') {
+          ctx.effect(() => {
+            const style = document.createElement('style')
+            style.setAttribute('data-dsh-my-model', 'nav-icon')
+            style.textContent = NAV_CSS
+            document.head.appendChild(style)
+            return () => style.remove()
+          })
+        }
         ctx.slots.inject('settings.section', () =>
           ctx.slots.register(
             {
               name: 'settings.section',
               id: 'my-model',
               order: 12,
-              label: () => t('section.label'),
+              label: () => renderSectionLabel(t),
             },
             Section,
           ),

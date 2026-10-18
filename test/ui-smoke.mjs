@@ -32,6 +32,7 @@ const plugin = definition.factory((name) => {
 })
 
 let section
+let sectionOptions
 const ctx = {
   effect(fn) {
     fn()
@@ -45,7 +46,8 @@ const ctx = {
     inject(_name, fn) {
       fn()
     },
-    register(_options, component) {
+    register(options, component) {
+      sectionOptions = options
       section = component
     },
   },
@@ -71,6 +73,15 @@ function findAll(node, predicate, hits = []) {
   for (const child of node.children) findAll(child, predicate, hits)
   return hits
 }
+
+// The settings shell falls back to the Settings gear for unknown section ids,
+// so the section label carries its own 16px glyph and the fallback gear is
+// hidden by the injected nav stylesheet.
+assert.equal(sectionOptions.id, 'my-model')
+const navLabel = sectionOptions.label()
+assert.equal(navLabel.props.className, 'dsh-mm-navLabel')
+assert.equal(findAll(navLabel, (node) => node.props.className === 'dsh-mm-navGlyph').length, 1)
+assert.match(textOf(navLabel), /我的模型/)
 
 stateQueue = []
 stateIndex = 0
@@ -127,7 +138,13 @@ const css = textOf(style)
 assert.match(css, /\.dsh-mm-button,\.dsh-mm-link\{[^}]*transform:none/)
 assert.match(css, /\.dsh-mm-button,\.dsh-mm-link\{[^}]*transition:background-color \.12s ease/)
 assert.match(css, /\.dsh-mm-section \.dsh-mm-button:hover,[\s\S]*?\{transform:none;filter:none;animation:none/)
-assert.match(css, /\.dsh-mm-button:focus-visible,\.dsh-mm-link:focus-visible,\.dsh-mm-summary:focus-visible\{[^}]*outline:2px solid/)
+assert.match(
+  css,
+  /\.dsh-mm-button:focus-visible,\.dsh-mm-link:focus-visible,\.dsh-mm-summary:focus-visible\{[^}]*box-shadow:0 0 0 var\(--dsw-focus-ring-width,2px\)/,
+)
+assert.match(css, /\.dsh-mm-input:focus\{border-color:var\(--dsw-alias-state-business-primary\)/)
+assert.match(css, /\.dsh-mm-button\{[^}]*border-radius:var\(--dsw-radius-md,12px\)/)
+assert.match(css, /\.dsh-mm-card\{[^}]*border-radius:var\(--dsw-radius-xl,20px\)/)
 
 // A status payload with a fingerprint block renders the advanced editor and its
 // save/reset actions without disturbing the primary account actions.
