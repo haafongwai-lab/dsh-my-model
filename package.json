@@ -1,11 +1,11 @@
 {
   "name": "@local/dsh-my-model",
-  "version": "1.4.4",
+  "version": "1.7.0",
   "private": true,
   "type": "module",
-  "description": "My Model: a DeepSeek web-account model provider for DeepSeek Harness.",
+  "description": "My Model: DeepSeek web and ChatGPT web model providers for DeepSeek Harness.",
   "scripts": {
-    "test": "node test/selftest.mjs && node test/stream-smoke.mjs && node test/host-smoke.mjs && node test/ui-smoke.mjs && node test/rate-limit.mjs && node test/recovery.mjs"
+    "test": "node test/selftest.mjs && node test/stream-smoke.mjs && node test/host-smoke.mjs && node test/ui-smoke.mjs && node test/rate-limit.mjs && node test/recovery.mjs && node test/chatgpt-smoke.mjs && node test/sha3.mjs && node test/cdp.mjs && node test/chrome-launch.mjs"
   },
   "exports": {
     ".": "./index.js",
@@ -16,6 +16,10 @@
     "index.js",
     "client.js",
     "deepseek-web.js",
+    "chatgpt-web.js",
+    "chrome-cdp.js",
+    "chrome-launch.js",
+    "sha3.js",
     "dsml.js",
     "pow.js",
     "sha3_wasm_bg.wasm",

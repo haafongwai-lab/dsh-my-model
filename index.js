@@ -28,6 +28,16 @@ import {
   PROVIDER_NAME,
   normalizeToken,
 } from './deepseek-web.js'
+import {
+  ChatGptWebAdapter,
+  ChatGptWebClient,
+  MODELS as CHATGPT_MODELS,
+  PROVIDER as CHATGPT_PROVIDER,
+  PROVIDER_NAME as CHATGPT_PROVIDER_NAME,
+  normalizeAccessToken,
+} from './chatgpt-web.js'
+import { probeCdp } from './chrome-cdp.js'
+import { LaunchError, launchChrome } from './chrome-launch.js'
 
 export const name = 'my-model'
 export const inject = ['llm']
@@ -37,6 +47,23 @@ const DEFAULTS = {
   clientVersion: DEFAULT_CLIENT_VERSION,
   tokenEnv: 'DEEPSEEK_WEB_TOKEN',
   cookiesEnv: 'DEEPSEEK_WEB_COOKIES',
+  // ChatGPT web account. Credentials live in the same store under their own
+  // keys so the two web accounts never overwrite each other.
+  chatgptBaseURL: 'https://chatgpt.com',
+  chatgptTokenEnv: 'CHATGPT_WEB_TOKEN',
+  chatgptCookiesEnv: 'CHATGPT_WEB_COOKIES',
+  chatgptModelSlug: 'gpt-6-luna',
+  chatgptLanguage: 'zh-CN',
+  // 'node' sends the request with fetch; 'cdp' runs it inside the user's own
+  // Chrome page so the TLS/HTTP2 fingerprint is the browser's.
+  chatgptTransport: 'node',
+  chatgptCdpPort: 9222,
+  chatgptCdpHost: '127.0.0.1',
+  // One-click launcher: which executable to start and where its dedicated
+  // profile lives. Empty means "find the browser automatically" and
+  // "<LOCALAPPDATA>/dsh-chrome".
+  chromePath: '',
+  chromeUserDataDir: '',
   timeoutMs: 300000,
   maxPromptChars: 1_000_000,
   // Tool results are truncated and secret-redacted before they reach the web
@@ -91,6 +118,12 @@ function safeGet(ctx, key) {
 }
 
 const PROFILE_OVERRIDES_FILE = '.my-model.json'
+/**
+ * ChatGPT transport settings live in their own file so the fingerprint overrides
+ * stay a pure fingerprint record (the settings page merges that file into the
+ * loader config field by field).
+ */
+const CHATGPT_SETTINGS_FILE = '.my-model-chatgpt.json'
 const FINGERPRINT_KEYS = [
   'userAgent',
   'secChUa',
@@ -178,6 +211,32 @@ function writeProfileOverrides(dir, overrides) {
   writeFileSync(file, `${JSON.stringify(overrides, null, 2)}\n`, 'utf8')
 }
 
+/** Read the persisted ChatGPT transport choice (missing file = defaults). */
+function readChatgptSettings(dir) {
+  if (!dir) return {}
+  try {
+    const parsed = JSON.parse(readFileSync(join(dir, CHATGPT_SETTINGS_FILE), 'utf8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    const out = {}
+    if (parsed.transport === 'cdp' || parsed.transport === 'node') out.chatgptTransport = parsed.transport
+    const port = Number(parsed.cdpPort)
+    if (Number.isInteger(port) && port > 0 && port < 65536) out.chatgptCdpPort = port
+    return out
+  } catch {
+    return {}
+  }
+}
+
+function writeChatgptSettings(dir, value) {
+  if (!dir) return
+  try {
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, CHATGPT_SETTINGS_FILE), `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+  } catch {
+    // Persisting the transport is a convenience; never fail the request for it.
+  }
+}
+
 const LOG_FILE = 'my-model.log'
 const LOG_MAX_BYTES = 1024 * 1024
 
@@ -245,6 +304,19 @@ function applyFingerprintToClient(client, effective) {
   client.referer = effective.referer ?? `${client.baseURL}/a/chat/`
 }
 
+/**
+ * The browser-identity fields shared by both web providers. The DeepSeek-only
+ * fields (`clientVersion`, fetch metadata, referer) are left to
+ * `applyFingerprintToClient`; ChatGPT sends a different header set.
+ */
+function applySharedFingerprint(client, effective) {
+  client.userAgent = effective.userAgent ?? DEFAULT_UA
+  client.secChUa = effective.secChUa ?? DEFAULT_SEC_CH_UA
+  client.secChUaPlatform = effective.secChUaPlatform ?? DEFAULT_SEC_CH_UA_PLATFORM
+  client.secChUaMobile = effective.secChUaMobile ?? DEFAULT_SEC_CH_UA_MOBILE
+  client.acceptLanguage = effective.acceptLanguage ?? DEFAULT_ACCEPT_LANGUAGE
+}
+
 function clampNumber(value, fallback, min, max) {
   const number = Number(value)
   if (!Number.isFinite(number)) return fallback
@@ -266,6 +338,37 @@ function optionsOf(config) {
       typeof input.cookiesEnv === 'string' && input.cookiesEnv.trim()
         ? input.cookiesEnv.trim()
         : DEFAULTS.cookiesEnv,
+    chatgptBaseURL:
+      typeof input.chatgptBaseURL === 'string' && input.chatgptBaseURL.trim()
+        ? input.chatgptBaseURL.trim()
+        : DEFAULTS.chatgptBaseURL,
+    chatgptTokenEnv:
+      typeof input.chatgptTokenEnv === 'string' && input.chatgptTokenEnv.trim()
+        ? input.chatgptTokenEnv.trim()
+        : DEFAULTS.chatgptTokenEnv,
+    chatgptCookiesEnv:
+      typeof input.chatgptCookiesEnv === 'string' && input.chatgptCookiesEnv.trim()
+        ? input.chatgptCookiesEnv.trim()
+        : DEFAULTS.chatgptCookiesEnv,
+    chatgptModelSlug:
+      typeof input.chatgptModelSlug === 'string' && input.chatgptModelSlug.trim()
+        ? input.chatgptModelSlug.trim()
+        : DEFAULTS.chatgptModelSlug,
+    chatgptLanguage:
+      typeof input.chatgptLanguage === 'string' && input.chatgptLanguage.trim()
+        ? input.chatgptLanguage.trim()
+        : DEFAULTS.chatgptLanguage,
+    chatgptTransport: input.chatgptTransport === 'cdp' ? 'cdp' : 'node',
+    chatgptCdpPort: Math.round(clampNumber(input.chatgptCdpPort, DEFAULTS.chatgptCdpPort, 1, 65535)),
+    chatgptCdpHost:
+      typeof input.chatgptCdpHost === 'string' && input.chatgptCdpHost.trim()
+        ? input.chatgptCdpHost.trim()
+        : DEFAULTS.chatgptCdpHost,
+    chromePath: typeof input.chromePath === 'string' && input.chromePath.trim() ? input.chromePath.trim() : '',
+    chromeUserDataDir:
+      typeof input.chromeUserDataDir === 'string' && input.chromeUserDataDir.trim()
+        ? input.chromeUserDataDir.trim()
+        : '',
     timeoutMs: Math.max(15000, Number(input.timeoutMs) || DEFAULTS.timeoutMs),
     maxPromptChars: Math.max(20000, Number(input.maxPromptChars) || DEFAULTS.maxPromptChars),
     maxToolChars: Math.max(500, Number(input.maxToolChars) || DEFAULTS.maxToolChars),
@@ -432,29 +535,35 @@ function trusted(ctx, req, res) {
 function createApi(ctx, options, adapter, state, extras = {}) {
   const credentials = () => safeGet(ctx, 'credentials')
   const log = extras.logger ?? ctx.logger
+  const chatgpt = extras.chatgpt ?? {}
 
-  const status = async () => {
-    const token = await describeSecret(ctx, options.tokenEnv)
-    const cookies = await describeSecret(ctx, options.cookiesEnv)
+  /**
+   * Status of one web account. Shared by the DeepSeek and ChatGPT cards so the
+   * settings page gets the same shape for both (and never a secret value).
+   */
+  const accountStatus = async ({
+    provider,
+    name,
+    models,
+    adapter: accountAdapter,
+    tokenEnv,
+    cookiesEnv,
+    baseURL,
+    state: accountState,
+  }) => {
+    const token = await describeSecret(ctx, tokenEnv)
+    const cookies = await describeSecret(ctx, cookiesEnv)
     let providerActive = false
     let routableModels = []
     try {
-      providerActive = ctx.llm.listProviders().some((provider) => provider.id === PROVIDER)
-      if (providerActive) routableModels = (await ctx.llm.listModels(PROVIDER)).map((model) => model.id)
+      providerActive = ctx.llm.listProviders().some((entry) => entry.id === provider)
+      if (providerActive) routableModels = (await ctx.llm.listModels(provider)).map((model) => model.id)
     } catch {
       providerActive = false
     }
-    const defaultModel = safeGet(ctx, 'agentDefaultModel')
-    let defaultSelection = null
-    try {
-      defaultSelection = defaultModel?.currentSelection?.() ?? null
-    } catch {
-      defaultSelection = null
-    }
     return {
-      ok: true,
-      provider: { id: PROVIDER, name: PROVIDER_NAME, active: providerActive },
-      models: MODELS.map((model) => ({
+      provider: { id: provider, name, active: providerActive },
+      models: models.map((model) => ({
         id: model.id,
         name: model.name,
         description: model.description,
@@ -464,9 +573,58 @@ function createApi(ctx, options, adapter, state, extras = {}) {
       })),
       token,
       cookies,
+      tokenEnv,
+      cookiesEnv,
+      baseURL,
+      lastTest: accountState?.lastTest ?? null,
+      lastFailure: accountAdapter?.lastFailure ?? null,
+    }
+  }
+
+  /**
+   * Whether a Chromium DevTools endpoint is listening, plus which browser it is.
+   * Cheap on loopback (a refused connection returns immediately).
+   */
+  const cdpStatus = async () => {
+    const port = chatgpt.adapter?.client?.cdpPort ?? options.chatgptCdpPort
+    const host = chatgpt.adapter?.client?.cdpHost ?? options.chatgptCdpHost
+    const probe = await probeCdp({ host, port, timeoutMs: 800 })
+    return { host, port, ...probe }
+  }
+
+  const status = async () => {
+    const primary = await accountStatus({
+      provider: PROVIDER,
+      name: PROVIDER_NAME,
+      models: MODELS,
+      adapter,
       tokenEnv: options.tokenEnv,
       cookiesEnv: options.cookiesEnv,
       baseURL: options.baseURL,
+      state,
+    })
+    const defaultModel = safeGet(ctx, 'agentDefaultModel')
+    let defaultSelection = null
+    try {
+      defaultSelection = defaultModel?.currentSelection?.() ?? null
+    } catch {
+      defaultSelection = null
+    }
+    const chatgptAccount = chatgpt.adapter
+      ? await accountStatus({
+          provider: CHATGPT_PROVIDER,
+          name: CHATGPT_PROVIDER_NAME,
+          models: CHATGPT_MODELS,
+          adapter: chatgpt.adapter,
+          tokenEnv: options.chatgptTokenEnv,
+          cookiesEnv: options.chatgptCookiesEnv,
+          baseURL: options.chatgptBaseURL,
+          state: chatgpt.state,
+        })
+      : null
+    return {
+      ok: true,
+      ...primary,
       defaultSelection,
       fingerprint: {
         userAgent: adapter.client.userAgent,
@@ -483,39 +641,75 @@ function createApi(ctx, options, adapter, state, extras = {}) {
         overridden: Object.keys(readProfileOverrides(extras.profileDir)).length > 0,
         persistable: Boolean(extras.profileDir),
       },
-      lastTest: state.lastTest,
-      lastFailure: adapter.lastFailure ?? null,
+      ...(chatgptAccount
+        ? {
+            chatgpt: {
+              ...chatgptAccount,
+              modelSlug: options.chatgptModelSlug,
+              transport: chatgpt.adapter?.client?.transport ?? options.chatgptTransport,
+              cdp: await cdpStatus(),
+            },
+          }
+        : {}),
     }
   }
 
-  const saveCredentials = async (req) => {
+  /**
+   * Store one account's token/cookie pair. Shared by both web providers; the
+   * token normalizer and the messages differ, the validation does not.
+   */
+  const saveCredentialsFor = async (req, { tokenEnv, cookiesEnv, normalize, state: accountState, tokenLabel }) => {
     const store = credentials()
     if (!store) throw new ApiError(409, 'The Harness credential service is unavailable in this profile.', 'NO_CREDENTIALS')
     const body = await readJson(req)
     if (body.clear === true) {
-      await store.unset(options.tokenEnv)
-      await store.unset(options.cookiesEnv)
-      state.lastTest = null
-      return status()
+      await store.unset(tokenEnv)
+      await store.unset(cookiesEnv)
+      accountState.lastTest = null
+      return
     }
     let changed = false
     if (typeof body.token === 'string') {
-      const token = normalizeToken(body.token)
+      const token = normalize(body.token)
       if (!token) throw new ApiError(400, 'The token is empty.', 'EMPTY_TOKEN')
       if (token.length > 16384) throw new ApiError(400, 'The token is too long.', 'TOKEN_TOO_LONG')
       if (/[\r\n]/.test(token)) throw new ApiError(400, 'The token must be one line.', 'TOKEN_MULTILINE')
-      await store.set(options.tokenEnv, token)
+      await store.set(tokenEnv, token)
       changed = true
     }
     if (typeof body.cookies === 'string') {
       const cookies = body.cookies.trim()
       if (cookies.length > 65536) throw new ApiError(400, 'The cookie text is too long.', 'COOKIES_TOO_LONG')
-      if (cookies) await store.set(options.cookiesEnv, cookies)
-      else await store.unset(options.cookiesEnv)
+      if (cookies) await store.set(cookiesEnv, cookies)
+      else await store.unset(cookiesEnv)
       changed = true
     }
-    if (!changed) throw new ApiError(400, 'Nothing to save; send a token or a cookie value.', 'NOTHING_TO_SAVE')
-    state.lastTest = null
+    if (!changed) {
+      throw new ApiError(400, `Nothing to save; send a ${tokenLabel} token or a cookie value.`, 'NOTHING_TO_SAVE')
+    }
+    accountState.lastTest = null
+  }
+
+  const saveCredentials = async (req) => {
+    await saveCredentialsFor(req, {
+      tokenEnv: options.tokenEnv,
+      cookiesEnv: options.cookiesEnv,
+      normalize: normalizeToken,
+      state,
+      tokenLabel: 'DeepSeek web',
+    })
+    return status()
+  }
+
+  const saveChatgptCredentials = async (req) => {
+    if (!chatgpt.adapter) throw new ApiError(409, 'The ChatGPT provider is not active in this profile.', 'NO_PROVIDER')
+    await saveCredentialsFor(req, {
+      tokenEnv: options.chatgptTokenEnv,
+      cookiesEnv: options.chatgptCookiesEnv,
+      normalize: normalizeAccessToken,
+      state: chatgpt.state,
+      tokenLabel: 'ChatGPT web',
+    })
     return status()
   }
 
@@ -573,17 +767,163 @@ function createApi(ctx, options, adapter, state, extras = {}) {
     return { ok: true, lastTest: state.lastTest, status: await status() }
   }
 
+  /**
+   * Verify the ChatGPT path without sending a chat message: the session endpoint
+   * proves the login, and the sentinel call proves the proof-of-work gate can be
+   * passed. Over CDP there is nothing to paste — the browser tab holds the
+   * session — so the credential requirement only applies to the Node transport.
+   */
+  const testChatgpt = async (req) => {
+    if (!chatgpt.adapter) throw new ApiError(409, 'The ChatGPT provider is not active in this profile.', 'NO_PROVIDER')
+    const live = chatgpt.adapter.client
+    const usingCdp = live.transport === 'cdp'
+    const body = await readJson(req)
+    const token =
+      typeof body.token === 'string' && body.token.trim()
+        ? normalizeAccessToken(body.token)
+        : await resolveSecret(ctx, options.chatgptTokenEnv)
+    const cookies =
+      typeof body.cookies === 'string' && body.cookies.trim()
+        ? body.cookies.trim()
+        : ((await resolveSecret(ctx, options.chatgptCookiesEnv)) ?? '')
+    if (!usingCdp && !token && !cookies) {
+      throw new ApiError(
+        400,
+        'Paste a ChatGPT accessToken, or the chatgpt.com cookie string, first.',
+        'MISSING_CREDENTIAL',
+      )
+    }
+    const client = new ChatGptWebClient({
+      baseURL: options.chatgptBaseURL,
+      timeoutMs: Math.min(options.timeoutMs, 60000),
+      userAgent: live.userAgent,
+      secChUa: live.secChUa,
+      secChUaPlatform: live.secChUaPlatform,
+      secChUaMobile: live.secChUaMobile,
+      acceptLanguage: live.acceptLanguage,
+      oaiLanguage: live.oaiLanguage,
+      token,
+      cookies,
+      logger: log,
+      // The test must exercise the transport the turns will use, otherwise a
+      // green result says nothing about the path that actually runs.
+      transport: live.transport,
+      cdpPort: live.cdpPort,
+      cdpHost: live.cdpHost,
+    })
+    try {
+      const result = await client.testAuth()
+      const who = result.email
+        ? `Signed in as ${result.email}${result.planType ? ` (${result.planType})` : ''}`
+        : 'Session accepted'
+      chatgpt.state.lastTest = {
+        ok: true,
+        at: new Date().toISOString(),
+        latencyMs: result.latencyMs,
+        message: result.turnstileRequired
+          ? usingCdp
+            ? `${who}; this account requires a Turnstile proof, so chat turns are sent through the open page's composer. ` +
+              'Keep that Chrome window open while the Harness works.'
+            : `${who}; this account requires a Turnstile proof, which only the page's own JavaScript can produce. ` +
+              'Switch to the local Chrome transport (or launch it from this page) and retry.'
+          : `${who}; the sentinel token was obtained.`,
+        turnstileRequired: Boolean(result.turnstileRequired),
+      }
+    } catch (error) {
+      chatgpt.state.lastTest = {
+        ok: false,
+        at: new Date().toISOString(),
+        message: error?.message ?? String(error),
+      }
+      throw new ApiError(400, error?.message ?? String(error), error?.code ?? 'TEST_FAILED')
+    }
+    return { ok: true, lastTest: chatgpt.state.lastTest, status: await status() }
+  }
+
+  const providerOfModel = (model) => {
+    if (MODELS.some((entry) => entry.id === model)) return PROVIDER
+    if (CHATGPT_MODELS.some((entry) => entry.id === model)) return CHATGPT_PROVIDER
+    return undefined
+  }
+
+  /**
+   * Switch how ChatGPT requests leave the machine:
+   *  - `node`  — fetch from the host (fails Cloudflare's device check in practice)
+   *  - `cdp`   — run the fetch inside the user's own Chrome tab
+   * The choice is applied immediately and persisted per profile.
+   */
+  const setChatgptTransport = async (req) => {
+    if (!chatgpt.adapter) throw new ApiError(409, 'The ChatGPT provider is not active in this profile.', 'NO_PROVIDER')
+    const body = await readJson(req)
+    const transport = body.transport
+    if (transport !== 'node' && transport !== 'cdp') {
+      throw new ApiError(400, 'transport must be "node" or "cdp".', 'BAD_TRANSPORT')
+    }
+    const client = chatgpt.adapter.client
+    client.setTransport(transport)
+    if (body.port !== undefined) {
+      const port = Number(body.port)
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new ApiError(400, 'port must be an integer between 1 and 65535.', 'BAD_PORT')
+      }
+      client.cdpPort = port
+    }
+    writeChatgptSettings(extras.profileDir, { transport, cdpPort: client.cdpPort })
+    chatgpt.state.lastTest = null
+    return status()
+  }
+
+  /**
+   * Start the local debug browser and switch ChatGPT to the transport that uses
+   * it — the two manual steps from the transport instructions, in one click.
+   * The executable and profile come from plugin config or the well-known
+   * locations; the request body may only choose an already validated port.
+   */
+  const launchChatgptChrome = async (req) => {
+    if (!chatgpt.adapter) throw new ApiError(409, 'The ChatGPT provider is not active in this profile.', 'NO_PROVIDER')
+    const body = await readJson(req)
+    const client = chatgpt.adapter.client
+    const port = body.port === undefined ? Number(client.cdpPort) : Number(body.port)
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new ApiError(400, 'port must be an integer between 1 and 65535.', 'BAD_PORT')
+    }
+    let launch
+    try {
+      launch = await launchChrome({
+        port,
+        host: client.cdpHost,
+        configuredExecutable: options.chromePath || undefined,
+        profileDir: options.chromeUserDataDir || undefined,
+      })
+    } catch (error) {
+      if (error instanceof LaunchError) {
+        log?.warn?.(`my-model: could not start local Chrome (${error.code}): ${error.message}`)
+        throw new ApiError(400, error.message, error.code)
+      }
+      throw error
+    }
+    // The debug browser is only useful to the transport that talks to it, and
+    // the user asked for one click — so save that choice too.
+    client.setTransport('cdp')
+    client.cdpPort = port
+    writeChatgptSettings(extras.profileDir, { transport: 'cdp', cdpPort: port })
+    chatgpt.state.lastTest = null
+    log?.info?.(`my-model: ${launch.message}`)
+    return { ok: true, launch, status: await status() }
+  }
+
   const setDefault = async (req) => {
     const body = await readJson(req)
     const model = String(body.model ?? '')
-    if (!MODELS.some((entry) => entry.id === model)) {
+    const provider = providerOfModel(model)
+    if (!provider) {
       throw new ApiError(400, `Unknown model "${model}".`, 'UNKNOWN_MODEL')
     }
     const service = safeGet(ctx, 'agentDefaultModel')
     if (!service?.saveSelection) {
       throw new ApiError(409, 'The default-model service is unavailable in this profile.', 'NO_DEFAULT_MODEL')
     }
-    await service.saveSelection({ provider: PROVIDER, model })
+    await service.saveSelection({ provider, model })
     let current = null
     try {
       current = service.currentSelection()
@@ -593,7 +933,7 @@ function createApi(ctx, options, adapter, state, extras = {}) {
     return {
       ok: true,
       defaultSelection: current,
-      changed: current?.provider === PROVIDER && current?.model === model,
+      changed: current?.provider === provider && current?.model === model,
     }
   }
 
@@ -637,6 +977,7 @@ function createApi(ctx, options, adapter, state, extras = {}) {
     // restart; the persisted file makes it survive the next boot.
     const effective = optionsOf({ ...(extras.loaderConfig ?? {}), ...readProfileOverrides(dir) })
     applyFingerprintToClient(adapter.client, effective)
+    if (chatgpt.adapter) applySharedFingerprint(chatgpt.adapter.client, effective)
     state.lastTest = null
     return status()
   }
@@ -669,6 +1010,26 @@ function createApi(ctx, options, adapter, state, extras = {}) {
         json(res, 200, await saveFingerprint(req))
         return
       }
+      if (path === '/my-model/api/chatgpt/status' && req.method === 'GET') {
+        json(res, 200, await status())
+        return
+      }
+      if (path === '/my-model/api/chatgpt/credentials' && req.method === 'POST') {
+        json(res, 200, await saveChatgptCredentials(req))
+        return
+      }
+      if (path === '/my-model/api/chatgpt/test' && req.method === 'POST') {
+        json(res, 200, await testChatgpt(req))
+        return
+      }
+      if (path === '/my-model/api/chatgpt/transport' && req.method === 'POST') {
+        json(res, 200, await setChatgptTransport(req))
+        return
+      }
+      if (path === '/my-model/api/chatgpt/launch' && req.method === 'POST') {
+        json(res, 200, await launchChatgptChrome(req))
+        return
+      }
       json(res, 404, { error: { code: 'NOT_FOUND', message: 'Unknown My Model endpoint.' } })
     } catch (error) {
       if (error instanceof ApiError) {
@@ -695,7 +1056,7 @@ export function apply(ctx, config) {
   const startupOverrides = readProfileOverrides(profileDir)
   // Settings-page overrides win over the loader config for the fields they
   // contain, mirroring the host's `base` + user-layer composition.
-  const options = optionsOf({ ...loaderConfig, ...startupOverrides })
+  const options = optionsOf({ ...loaderConfig, ...startupOverrides, ...readChatgptSettings(profileDir) })
   // The built-in fingerprint is a snapshot and goes stale as the browser and
   // web client update. When no settings-page overrides exist, surface that the
   // defaults are in use instead of failing silently.
@@ -739,7 +1100,38 @@ export function apply(ctx, config) {
     humanLongPauseMaxMs: options.humanLongPauseMaxMs,
   })
 
+  const chatgptAdapter = new ChatGptWebAdapter({
+    baseURL: options.chatgptBaseURL,
+    timeoutMs: options.timeoutMs,
+    modelSlug: options.chatgptModelSlug,
+    transport: options.chatgptTransport,
+    cdpPort: options.chatgptCdpPort,
+    cdpHost: options.chatgptCdpHost,
+    userAgent: options.userAgent,
+    secChUa: options.secChUa,
+    secChUaPlatform: options.secChUaPlatform,
+    secChUaMobile: options.secChUaMobile,
+    acceptLanguage: options.acceptLanguage,
+    oaiLanguage: options.chatgptLanguage,
+    maxPromptChars: options.maxPromptChars,
+    maxToolChars: options.maxToolChars,
+    logger,
+    resolveToken: () => resolveSecret(ctx, options.chatgptTokenEnv),
+    resolveCookies: () => resolveSecret(ctx, options.chatgptCookiesEnv),
+    minTurnGapMs: options.minTurnGapMs,
+    maxConcurrentTurns: options.maxConcurrentTurns,
+    maxAutoWaitMs: options.maxAutoWaitMs,
+    cooldownBaseMs: options.cooldownBaseMs,
+    maxCooldownMs: options.maxCooldownMs,
+    humanizePacing: options.humanizePacing,
+    turnGapJitter: options.turnGapJitter,
+    humanLongPauseChance: options.humanLongPauseChance,
+    humanLongPauseMinMs: options.humanLongPauseMinMs,
+    humanLongPauseMaxMs: options.humanLongPauseMaxMs,
+  })
+
   ctx.llm.registerAdapter([PROVIDER], adapter)
+  ctx.llm.registerAdapter([CHATGPT_PROVIDER], chatgptAdapter)
 
   // `webServer` is a sibling fiber that becomes active only after its listen()
   // resolves. Reading it through ctx.get() at apply time can therefore return
@@ -747,13 +1139,24 @@ export function apply(ctx, config) {
   // in headless profiles that never provide it this callback simply never runs.
   ctx.inject(['webServer'], (httpCtx) => {
     const state = { lastTest: null }
-    const handler = createApi(ctx, options, adapter, state, { loaderConfig, profileDir, logger })
+    const chatgptState = { lastTest: null }
+    const handler = createApi(ctx, options, adapter, state, {
+      loaderConfig,
+      profileDir,
+      logger,
+      chatgpt: { adapter: chatgptAdapter, state: chatgptState },
+    })
     for (const path of [
       '/my-model/api/status',
       '/my-model/api/credentials',
       '/my-model/api/test',
       '/my-model/api/default',
       '/my-model/api/fingerprint',
+      '/my-model/api/chatgpt/status',
+      '/my-model/api/chatgpt/credentials',
+      '/my-model/api/chatgpt/test',
+      '/my-model/api/chatgpt/transport',
+      '/my-model/api/chatgpt/launch',
     ]) {
       httpCtx.effect(() => httpCtx.webServer.register({ kind: 'exact', path, handler }))
     }

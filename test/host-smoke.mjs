@@ -6,6 +6,7 @@ import { Readable } from 'node:stream'
 import { pathToFileURL } from 'node:url'
 import { apply } from '../index.js'
 import { PROVIDER } from '../deepseek-web.js'
+import { PROVIDER as CHATGPT_PROVIDER } from '../chatgpt-web.js'
 
 const routes = new Map()
 const effects = []
@@ -62,15 +63,25 @@ const ctx = {
   },
   llm: {
     registerAdapter(providers, adapter) {
-      assert.deepEqual(providers, [PROVIDER])
-      globalThis.__adapter = adapter
+      assert.equal(providers.length, 1)
+      if (providers[0] === PROVIDER) {
+        globalThis.__adapter = adapter
+      } else if (providers[0] === CHATGPT_PROVIDER) {
+        globalThis.__chatgptAdapter = adapter
+      } else {
+        throw new Error(`unexpected provider ${providers[0]}`)
+      }
       return () => {}
     },
     listProviders() {
-      return [{ id: PROVIDER, name: 'My Model' }]
+      return [
+        { id: PROVIDER, name: 'My Model' },
+        { id: CHATGPT_PROVIDER, name: 'My Model · ChatGPT Web' },
+      ]
     },
-    async listModels() {
-      return globalThis.__adapter.listModels()
+    async listModels(provider) {
+      const target = provider === CHATGPT_PROVIDER ? globalThis.__chatgptAdapter : globalThis.__adapter
+      return target.listModels()
     },
   },
 }
@@ -82,10 +93,15 @@ ctx.baseUrl = pathToFileURL(`${profileDir}/`)
 
 apply(ctx, {})
 assert.ok(globalThis.__adapter, 'adapter registered')
+assert.ok(globalThis.__chatgptAdapter, 'chatgpt adapter registered')
 assert.equal(existsSync(join(profileDir, 'my-model.log')), true, 'plugin log file is written')
 assert.equal((await globalThis.__adapter.listModels()).length, 3)
+assert.equal((await globalThis.__chatgptAdapter.listModels()).length, 1)
 assert.equal((await globalThis.__adapter.resolveModel(PROVIDER, 'deepseek-web-chat')).id, 'deepseek-web-chat')
 assert.equal((await globalThis.__adapter.prepareCall(PROVIDER, 'deepseek-web-thinking')).model.reasoning.defaultEffort, 'high')
+assert.equal((await globalThis.__chatgptAdapter.resolveModel(CHATGPT_PROVIDER, 'chatgpt-web-chat')).provider, CHATGPT_PROVIDER)
+assert.equal(globalThis.__chatgptAdapter.client.baseURL, 'https://chatgpt.com')
+assert.equal(globalThis.__chatgptAdapter.modelSlug, 'gpt-6-luna')
 
 // The web routes must wait for the webServer fiber: reading it eagerly during
 // apply used to return undefined and left the settings page on HTTP 404.
@@ -98,7 +114,7 @@ pendingWebServer({
     effects.push(dispose)
   },
 })
-assert.equal(routes.size, 5, 'all settings routes registered once webServer is ready')
+assert.equal(routes.size, 10, 'all settings routes registered once webServer is ready')
 
 function request(url, body) {
   const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))])
@@ -131,6 +147,10 @@ const status = JSON.parse(statusRes.body)
 assert.equal(status.provider.id, PROVIDER)
 assert.equal(status.token.configured, false)
 assert.equal(status.models.length, 3)
+assert.equal(status.chatgpt.provider.id, CHATGPT_PROVIDER)
+assert.equal(status.chatgpt.token.configured, false)
+assert.equal(status.chatgpt.models.length, 1)
+assert.equal(status.chatgpt.baseURL, 'https://chatgpt.com')
 
 const saveRes = response()
 await routes.get('/my-model/api/credentials')(
@@ -141,6 +161,19 @@ assert.equal(saveRes.status, 200)
 assert.equal(stored.get('DEEPSEEK_WEB_TOKEN'), 'secret-token')
 assert.equal(stored.get('DEEPSEEK_WEB_COOKIES'), 'a=b; c=d')
 
+// The ChatGPT account keeps its own credential keys, so the two web accounts
+// never overwrite one another.
+const chatgptSaveRes = response()
+await routes.get('/my-model/api/chatgpt/credentials')(
+  request('/my-model/api/chatgpt/credentials', { token: 'Bearer chatgpt-access', cookies: 'oai-did=x; __Secure-next-auth.session-token=y' }),
+  chatgptSaveRes,
+)
+assert.equal(chatgptSaveRes.status, 200)
+assert.equal(stored.get('DEEPSEEK_WEB_TOKEN'), 'secret-token', 'the DeepSeek token is untouched')
+assert.equal(stored.get('CHATGPT_WEB_TOKEN'), 'chatgpt-access')
+assert.equal(stored.get('CHATGPT_WEB_COOKIES'), 'oai-did=x; __Secure-next-auth.session-token=y')
+
+// A model id decides which provider the default goes to.
 const defaultRes = response()
 await routes.get('/my-model/api/default')(
   request('/my-model/api/default', { model: 'deepseek-web-thinking' }),
@@ -148,6 +181,18 @@ await routes.get('/my-model/api/default')(
 )
 assert.equal(defaultRes.status, 200)
 assert.deepEqual(savedDefaults[0], { provider: PROVIDER, model: 'deepseek-web-thinking' })
+
+const chatgptDefaultRes = response()
+await routes.get('/my-model/api/default')(
+  request('/my-model/api/default', { model: 'chatgpt-web-chat' }),
+  chatgptDefaultRes,
+)
+assert.equal(chatgptDefaultRes.status, 200)
+assert.deepEqual(savedDefaults[1], { provider: CHATGPT_PROVIDER, model: 'chatgpt-web-chat' })
+
+const unknownDefaultRes = response()
+await routes.get('/my-model/api/default')(request('/my-model/api/default', { model: 'nope' }), unknownDefaultRes)
+assert.equal(unknownDefaultRes.status, 400)
 
 // Cross-site browser writes are rejected even without the host connection guard
 // (CSRF protection); a same-origin request is still allowed.
@@ -192,6 +237,62 @@ assert.deepEqual(savedDefaults[0], { provider: PROVIDER, model: 'deepseek-web-th
   assert.equal(reset.fingerprint.overridden, false)
   assert.notEqual(globalThis.__adapter.client.userAgent, 'UA-TEST')
   assert.equal(existsSync(join(profileDir, '.my-model.json')), false, 'reset removes the overrides file')
+}
+
+// The transport switch is applied immediately and persisted per profile; in CDP
+// mode a connection test must not demand a pasted credential. The port is one
+// nothing listens on, so the assertion does not depend on whether the machine
+// running the tests happens to have Chrome open with a debug port.
+{
+  const transportRes = response()
+  await routes.get('/my-model/api/chatgpt/transport')(
+    request('/my-model/api/chatgpt/transport', { transport: 'cdp', port: 65001 }),
+    transportRes,
+  )
+  assert.equal(transportRes.status, 200)
+  const payload = JSON.parse(transportRes.body)
+  assert.equal(payload.chatgpt.transport, 'cdp')
+  assert.equal(payload.chatgpt.cdp.port, 65001)
+  assert.equal(globalThis.__chatgptAdapter.client.transport, 'cdp')
+  const persisted = JSON.parse(readFileSync(join(profileDir, '.my-model-chatgpt.json'), 'utf8'))
+  assert.equal(persisted.transport, 'cdp')
+  assert.equal(persisted.cdpPort, 65001)
+
+  const cdpTestRes = response()
+  await routes.get('/my-model/api/chatgpt/test')(request('/my-model/api/chatgpt/test', {}), cdpTestRes)
+  assert.equal(cdpTestRes.status, 400)
+  const cdpTest = JSON.parse(cdpTestRes.body)
+  assert.equal(
+    cdpTest.error.code,
+    'CDP_UNAVAILABLE',
+    'with no Chrome listening the failure names the transport, not a missing credential',
+  )
+
+  const badTransport = response()
+  await routes.get('/my-model/api/chatgpt/transport')(
+    request('/my-model/api/chatgpt/transport', { transport: 'carrier-pigeon' }),
+    badTransport,
+  )
+  assert.equal(badTransport.status, 400)
+
+  const backRes = response()
+  await routes.get('/my-model/api/chatgpt/transport')(
+    request('/my-model/api/chatgpt/transport', { transport: 'node' }),
+    backRes,
+  )
+  assert.equal(JSON.parse(backRes.body).chatgpt.transport, 'node')
+
+  // The launcher validates its input before touching the machine, so an invalid
+  // body never spawns a browser (and is safe to exercise in a test).
+  const badPort = response()
+  await routes.get('/my-model/api/chatgpt/launch')(request('/my-model/api/chatgpt/launch', { port: 0 }), badPort)
+  assert.equal(badPort.status, 400)
+  assert.equal(JSON.parse(badPort.body).error.code, 'BAD_PORT')
+  assert.equal(
+    globalThis.__chatgptAdapter.client.transport,
+    'node',
+    'a rejected launch leaves the transport untouched',
+  )
 }
 
 for (const dispose of effects) if (typeof dispose === 'function') await dispose()

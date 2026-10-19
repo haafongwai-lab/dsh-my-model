@@ -132,7 +132,7 @@ function clampNumber(value, min, max) {
   return Math.min(max, Math.max(min, number))
 }
 
-function retryAfterMsFromHeaders(headers) {
+export function retryAfterMsFromHeaders(headers) {
   if (!headers || typeof headers.get !== 'function') return undefined
   let raw
   try {
@@ -283,8 +283,12 @@ export class TurnScheduler {
     humanLongPauseMinMs = 5000,
     humanLongPauseMaxMs = 20000,
     random = Math.random,
+    // Provider name used in log lines and abort messages, so a second web
+    // provider (ChatGPT Web) reports its own name instead of DeepSeek's.
+    label = 'DeepSeek Web',
     logger,
   } = {}) {
+    this.label = String(label || 'DeepSeek Web')
     this.maxConcurrent = Math.round(clampNumber(maxConcurrentTurns, 1, 8))
     this.minGapMs = clampNumber(minTurnGapMs, 0, 60000)
     this.maxAutoWaitMs = clampNumber(maxAutoWaitMs, 0, 180000)
@@ -320,12 +324,12 @@ export class TurnScheduler {
   /** Wait for a free slot, the inter-turn gap, and any active cooldown. */
   async acquire(signal) {
     while (true) {
-      if (signal?.aborted) throw new AdapterError('DeepSeek Web request aborted', 'ABORTED')
+      if (signal?.aborted) throw new AdapterError(`${this.label} request aborted`, 'ABORTED')
       const now = Date.now()
       const remaining = this.cooldownUntil - now
       if (remaining > this.maxAutoWaitMs) {
         throw new AdapterError(
-          `DeepSeek Web is rate limiting this account; retry in ${Math.ceil(remaining / 1000)}s.`,
+          `${this.label} is rate limiting this account; retry in ${Math.ceil(remaining / 1000)}s.`,
           'RATE_LIMIT',
           undefined,
           { providerRetryAfterMs: remaining, fromGate: true },
@@ -385,7 +389,7 @@ export class TurnScheduler {
     this.streak += 1
     this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + delay)
     this.logger?.warn?.(
-      `my-model: DeepSeek Web rate limited; cooling down for ${Math.ceil(delay / 1000)}s (attempt ${this.streak})`,
+      `my-model: ${this.label} rate limited; cooling down for ${Math.ceil(delay / 1000)}s (attempt ${this.streak})`,
     )
     this.wake()
     return this.cooldownRemainingMs
@@ -418,7 +422,7 @@ export class TurnScheduler {
         else resolve()
       }
       const wake = () => finish()
-      const onAbort = () => finish(new AdapterError('DeepSeek Web request aborted', 'ABORTED'))
+      const onAbort = () => finish(new AdapterError(`${this.label} request aborted`, 'ABORTED'))
       const timer = setTimeout(wake, Math.max(1, ms))
       this.waiters.add(wake)
       signal?.addEventListener('abort', onAbort, { once: true })
@@ -426,13 +430,13 @@ export class TurnScheduler {
   }
 }
 
-function abortableSleep(ms, signal) {
+export function abortableSleep(ms, signal, label = 'DeepSeek Web') {
   if (!(ms > 0)) return Promise.resolve()
-  if (signal?.aborted) return Promise.reject(new AdapterError('DeepSeek Web request aborted', 'ABORTED'))
+  if (signal?.aborted) return Promise.reject(new AdapterError(`${label} request aborted`, 'ABORTED'))
   return new Promise((resolve, reject) => {
     const onAbort = () => {
       clearTimeout(timer)
-      reject(new AdapterError('DeepSeek Web request aborted', 'ABORTED'))
+      reject(new AdapterError(`${label} request aborted`, 'ABORTED'))
     }
     const timer = setTimeout(() => {
       signal?.removeEventListener('abort', onAbort)
@@ -451,11 +455,11 @@ function rateLimitWithDelay(error, delayMs) {
   return new AdapterError(message, 'RATE_LIMIT', error.status, { providerRetryAfterMs: retryAfterMs })
 }
 
-function hashToken(token) {
+export function hashToken(token) {
   return createHash('sha256').update(token).digest('hex').slice(0, 16)
 }
 
-class CookieJar {
+export class CookieJar {
   constructor(seed = '') {
     this.values = new Map()
     this.seed(seed)

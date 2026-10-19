@@ -7,9 +7,45 @@ window.__ModuleLoader__.load({
     const ZH = {
       'section.label': '我的模型',
       title: '我的模型',
-      intro: '使用你自己的 DeepSeek 网页版账号，在 Harness 中调用 chat.deepseek.com 的免费网页模型。',
+      intro:
+        '使用你自己的 DeepSeek 网页版或 ChatGPT 网页版登录态，在 Harness 中调用 chat.deepseek.com 与 chatgpt.com 的免费网页模型。',
       'account.title': 'DeepSeek 网页版账号',
       'account.desc': '凭据保存在 Harness 本地凭据库，不会写入配置文件。',
+      'chatgpt.title': 'ChatGPT 网页版账号',
+      'chatgpt.desc': '使用 accessToken 或 chatgpt.com 的 Cookie；凭据同样只保存在本机凭据库。',
+      'chatgpt.descCdp': '登录态由本机 Chrome 窗口提供，下面的 Token / Cookie 可以留空。',
+      'chatgpt.cdpReady': '已连上 Chrome',
+      'chatgpt.cdpMissing': '未连上 Chrome',
+      'chatgpt.help.summary': '如何获取 ChatGPT 登录态',
+      'chatgpt.help.step1': '在浏览器打开 chatgpt.com 并登录。',
+      'chatgpt.help.step2': 'F12 打开开发者工具 → Network，任选一条 backend-api 请求。',
+      'chatgpt.help.step3': '在请求头里复制 Authorization: Bearer 后面那一串（accessToken），或复制 Request Headers 里整段 Cookie。',
+      'chatgpt.help.step4': '回到这里粘贴并保存。访问 https://chatgpt.com/api/auth/session 也能拿到 accessToken，有效期有限，失效时重新复制即可。',
+      'chatgpt.paste': '粘贴 accessToken（Bearer 后面那一串）或整段 Cookie',
+      'chatgpt.cookie.placeholder': '遇到人机验证或 Cloudflare 拦截时，粘贴 chatgpt.com 的 Cookie（含 cf_clearance）',
+      'chatgpt.tested': '连接成功，sentinel 校验已通过。',
+      'chatgpt.confirmClear': '确定要清除保存的 accessToken 和 Cookie 吗？',
+      'transport.label': '传输方式',
+      'transport.node': 'Node 直连',
+      'transport.cdp': '本机 Chrome',
+      'transport.desc':
+        'Node 直连会带上非浏览器的 TLS 指纹，容易被 Cloudflare 判定为「设备异常」（HTTP 403 Unusual activity）。改用本机 Chrome 后，请求在已登录 chatgpt.com 的页面里发出，TLS、HTTP/2、Cookie 与指纹都是浏览器的。',
+      'transport.useNode': '改用 Node 直连',
+      'transport.useCdp': '改用本机 Chrome',
+      'transport.reachable': '调试端口可用',
+      'transport.unreachable': '未检测到 Chrome 调试端口',
+      'transport.howto': '如何开启 Chrome 调试端口',
+      'transport.step1': '完全退出 Chrome（任务管理器里确认没有残留进程）。',
+      'transport.step2':
+        '用独立用户目录启动（Chrome 136 起默认用户目录不允许远程调试，必须带 --user-data-dir）：',
+      'transport.step3': '在那个窗口里登录 chatgpt.com 并保持打开，然后点「改用本机 Chrome」并重新测试连接。',
+      'transport.saved': '传输方式已切换。',
+      'launch.action': '一键启动本地 Chrome',
+      'launch.starting': '正在启动 Chrome…',
+      'launch.hint':
+        '用独立配置目录打开一个可调试的 Chrome 窗口并自动切到「本机 Chrome」。首次请在该窗口登录 chatgpt.com，之后保持打开即可。',
+      'launch.started': 'Chrome 已启动，请在该窗口登录 chatgpt.com。',
+      'launch.alreadyRunning': '调试端口已在监听，已切到「本机 Chrome」。',
       'token.label': 'User Token',
       'token.placeholder.empty': '粘贴 chat.deepseek.com 的 userToken',
       'token.placeholder.saved': '已保存，留空保持不变',
@@ -53,7 +89,8 @@ window.__ModuleLoader__.load({
       'fingerprint.unavailable': '当前无法定位 profile 目录，指纹无法持久化；请直接编辑插件配置。',
       'models.unavailable': '当前未注册（插件配置可能未生效）',
       'models.empty': '当前没有可用模型。',
-      notice: '这不是 DeepSeek 官方 API。它使用网页版登录态和网页版配额，受 DeepSeek 服务条款约束；接口变化或风控可能导致失效。请勿分享 Token。',
+      notice:
+        '这不是 DeepSeek 或 OpenAI 的官方 API。它使用网页版登录态和网页版配额，受各自服务条款约束；接口变化、风控或人机验证都可能导致失效。请勿分享 Token 与 Cookie。',
       'message.saved': '已保存。',
       'message.tested': '连接成功，Token 有效。',
       'message.cleared': '已清除保存的 Token 和 Cookie。',
@@ -73,9 +110,48 @@ window.__ModuleLoader__.load({
     const EN = {
       'section.label': 'My Model',
       title: 'My Model',
-      intro: 'Use your own DeepSeek web account to call the free chat.deepseek.com models from Harness.',
+      intro: 'Use your own DeepSeek web or ChatGPT web login to call the free chat.deepseek.com and chatgpt.com models from Harness.',
       'account.title': 'DeepSeek web account',
       'account.desc': 'Credentials are stored in the local Harness credential store, not in a config file.',
+      'chatgpt.title': 'ChatGPT web account',
+      'chatgpt.desc': 'Use an accessToken or the chatgpt.com cookies; both stay in the local credential store.',
+      'chatgpt.descCdp': 'The local Chrome window provides the session, so Token and Cookie can stay empty.',
+      'chatgpt.cdpReady': 'Chrome attached',
+      'chatgpt.cdpMissing': 'Chrome not attached',
+      'chatgpt.help.summary': 'How to get a ChatGPT login',
+      'chatgpt.help.step1': 'Open chatgpt.com in a browser and sign in.',
+      'chatgpt.help.step2': 'Open DevTools → Network and pick any backend-api request.',
+      'chatgpt.help.step3':
+        'Copy the string after Authorization: Bearer (the accessToken), or the whole Cookie request header.',
+      'chatgpt.help.step4':
+        'Paste it here and save. https://chatgpt.com/api/auth/session also returns an accessToken; it expires, so re-copy it when a turn fails.',
+      'chatgpt.paste': 'Paste the accessToken (after Bearer) or the whole Cookie string',
+      'chatgpt.cookie.placeholder':
+        'Paste chatgpt.com cookies (including cf_clearance) if a human-verification or Cloudflare challenge blocks the turn',
+      'chatgpt.tested': 'Connected — the sentinel check passed.',
+      'chatgpt.confirmClear': 'Clear the stored accessToken and cookie?',
+      'transport.label': 'Transport',
+      'transport.node': 'Node fetch',
+      'transport.cdp': 'Local Chrome',
+      'transport.desc':
+        'Node fetch carries a non-browser TLS fingerprint, which Cloudflare scores as “unusual activity” (HTTP 403). With local Chrome the request runs inside your logged-in chatgpt.com tab, so TLS, HTTP/2, cookies and client hints are the browser’s own.',
+      'transport.useNode': 'Use Node fetch',
+      'transport.useCdp': 'Use local Chrome',
+      'transport.reachable': 'debug port reachable',
+      'transport.unreachable': 'no Chrome debug port detected',
+      'transport.howto': 'How to open the Chrome debug port',
+      'transport.step1': 'Quit Chrome completely (check the task manager for leftovers).',
+      'transport.step2':
+        'Start it with a separate profile (since Chrome 136 the default profile refuses remote debugging, so --user-data-dir is required):',
+      'transport.step3':
+        'Sign in to chatgpt.com in that window, keep it open, then choose “Use local Chrome” and test the connection again.',
+      'transport.saved': 'Transport switched.',
+      'launch.action': 'Launch local Chrome',
+      'launch.starting': 'Starting Chrome…',
+      'launch.hint':
+        'Opens a debuggable Chrome window on a dedicated profile and switches to “Local Chrome”. Sign in to chatgpt.com there once, then keep the window open.',
+      'launch.started': 'Chrome started — sign in to chatgpt.com in that window.',
+      'launch.alreadyRunning': 'A debug port is already listening; switched to “Local Chrome”.',
       'token.label': 'User token',
       'token.placeholder.empty': 'Paste the chat.deepseek.com userToken',
       'token.placeholder.saved': 'Saved — leave blank to keep it',
@@ -119,7 +195,8 @@ window.__ModuleLoader__.load({
       'fingerprint.unavailable': 'The profile directory could not be located, so the fingerprint cannot be persisted; edit the plugin config instead.',
       'models.unavailable': 'Not registered right now (the plugin configuration may not be active)',
       'models.empty': 'No models are available right now.',
-      notice: 'This is not the official DeepSeek API. It uses your web login and web quota, subject to DeepSeek’s terms; upstream changes or anti-bot checks can break it. Never share your token.',
+      notice:
+        'This is not the official DeepSeek or OpenAI API. It uses your web login and web quota, subject to each service’s terms; upstream changes, anti-bot checks, or human-verification challenges can break it. Never share your token or cookies.',
       'message.saved': 'Saved.',
       'message.tested': 'Connected — the token works.',
       'message.cleared': 'Stored token and cookie cleared.',
@@ -216,6 +293,7 @@ window.__ModuleLoader__.load({
 .dsh-mm-error{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px;margin:0}
 .dsh-mm-messageLine{align-items:center;display:flex;flex-wrap:wrap;gap:4px}
 .dsh-mm-notice{color:var(--dsw-alias-state-warn-label);font-size:12px;line-height:18px;margin:0}
+.dsh-mm-code{background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-sm,8px);color:var(--dsw-alias-label-secondary);display:block;font-family:var(--ds-font-family-code);font-size:12px;line-height:18px;margin:6px 0 0;overflow-x:auto;padding:6px 8px;white-space:pre}
 @media (max-width:560px){.dsh-mm-card{padding:12px}.dsh-mm-editor{padding:12px}.dsh-mm-rowMeta{display:none}}
 @media (prefers-reduced-motion:reduce){.dsh-mm-summary::before{transition:none}}
 `
@@ -289,6 +367,8 @@ nav button:has(.dsh-mm-navGlyph)>svg{display:none}
         const [busy, setBusy] = React.useState('')
         const [message, setMessage] = React.useState(null)
         const [fpDraft, setFpDraft] = React.useState(null)
+        const [chatgptToken, setChatgptToken] = React.useState('')
+        const [chatgptCookies, setChatgptCookies] = React.useState('')
 
         const load = React.useCallback(async () => {
           try {
@@ -381,6 +461,116 @@ nav button:has(.dsh-mm-navGlyph)>svg{display:none}
           }
         }
 
+        const saveChatgpt = async () => {
+          setBusy('chatgptSave')
+          setMessage(null)
+          try {
+            const body = {}
+            if (chatgptToken.trim()) body.token = chatgptToken.trim()
+            if (chatgptCookies.trim()) body.cookies = chatgptCookies.trim()
+            if (!body.token && !body.cookies) {
+              setMessage({ kind: 'error', text: t('message.nothingToSave') })
+              return
+            }
+            const next = await request('/my-model/api/chatgpt/credentials', body)
+            setStatus(next)
+            setChatgptToken('')
+            setChatgptCookies('')
+            setMessage({ kind: 'ok', text: t('message.saved') })
+          } catch (error) {
+            setMessage({ kind: 'error', text: error.message ?? String(error) })
+          } finally {
+            setBusy('')
+          }
+        }
+
+        const testChatgpt = async () => {
+          setBusy('chatgptTest')
+          setMessage(null)
+          try {
+            const body = {}
+            if (chatgptToken.trim()) body.token = chatgptToken.trim()
+            if (chatgptCookies.trim()) body.cookies = chatgptCookies.trim()
+            const result = await request('/my-model/api/chatgpt/test', body)
+            setStatus(result.status ?? status)
+            setMessage(
+              result.lastTest?.ok === true
+                ? {
+                    kind: 'ok',
+                    text: `${t('chatgpt.tested')} ${result.lastTest?.latencyMs ? `(${result.lastTest.latencyMs} ms)` : ''}`.trim(),
+                  }
+                : { kind: 'error', text: result.lastTest?.message ?? String(result.message ?? '') },
+            )
+          } catch (error) {
+            setMessage({ kind: 'error', text: error.message ?? String(error) })
+          } finally {
+            setBusy('')
+          }
+        }
+
+        const clearChatgpt = async () => {
+          if (!window.confirm(t('chatgpt.confirmClear'))) return
+          setBusy('chatgptClear')
+          setMessage(null)
+          try {
+            const next = await request('/my-model/api/chatgpt/credentials', { clear: true })
+            setStatus(next)
+            setChatgptToken('')
+            setChatgptCookies('')
+            setMessage({ kind: 'ok', text: t('message.cleared') })
+          } catch (error) {
+            setMessage({ kind: 'error', text: error.message ?? String(error) })
+          } finally {
+            setBusy('')
+          }
+        }
+
+        const clearChatgptCookie = async () => {
+          setBusy('chatgptCookie')
+          setMessage(null)
+          try {
+            const next = await request('/my-model/api/chatgpt/credentials', { cookies: '' })
+            setStatus(next)
+            setChatgptCookies('')
+            setMessage({ kind: 'ok', text: t('message.cookieCleared') })
+          } catch (error) {
+            setMessage({ kind: 'error', text: error.message ?? String(error) })
+          } finally {
+            setBusy('')
+          }
+        }
+
+        const setTransport = async (mode) => {
+          setBusy('transport')
+          setMessage(null)
+          try {
+            const next = await request('/my-model/api/chatgpt/transport', { transport: mode })
+            setStatus(next)
+            setMessage({ kind: 'ok', text: t('transport.saved') })
+          } catch (error) {
+            setMessage({ kind: 'error', text: error.message ?? String(error) })
+          } finally {
+            setBusy('')
+          }
+        }
+
+        const launchChrome = async () => {
+          setBusy('launchChrome')
+          setMessage(null)
+          try {
+            const result = await request('/my-model/api/chatgpt/launch', {})
+            setStatus(result.status ?? status)
+            setMessage({
+              kind: 'ok',
+              text: result.launch?.alreadyRunning ? t('launch.alreadyRunning') : t('launch.started'),
+            })
+          } catch (error) {
+            setMessage({ kind: 'error', text: error.message ?? String(error) })
+          } finally {
+            setBusy('')
+          }
+        }
+
         const setDefault = async (model) => {
           setBusy(`default:${model}`)
           setMessage(null)
@@ -439,6 +629,25 @@ nav button:has(.dsh-mm-navGlyph)>svg{display:none}
         const cookieConfigured = status?.cookies?.configured === true
         const active = status?.provider?.active === true
         const models = Array.isArray(status?.models) ? status.models : []
+        // The model list shows both providers; each model remembers where it
+        // routes so "set as default" can pick the right account.
+        const allModels = [
+          ...models.map((model) => ({ ...model, provider: status?.provider?.id })),
+          ...(Array.isArray(status?.chatgpt?.models) ? status.chatgpt.models : []).map((model) => ({
+            ...model,
+            provider: status.chatgpt.provider?.id,
+          })),
+        ]
+        const chatgptTokenConfigured = status?.chatgpt?.token?.configured === true
+        const chatgptCookieConfigured = status?.chatgpt?.cookies?.configured === true
+        // Over CDP the browser tab holds the session, so no token is needed and
+        // the test must stay clickable with both fields empty.
+        const chatgptViaCdp = status?.chatgpt?.transport === 'cdp'
+        const chatgptCdpReady = status?.chatgpt?.cdp?.reachable === true
+        const canSaveChatgpt = Boolean(chatgptToken.trim() || chatgptCookies.trim())
+        const canTestChatgpt =
+          chatgptViaCdp || chatgptTokenConfigured || Boolean(chatgptToken.trim()) || chatgptCookieConfigured
+        const chatgptReady = chatgptViaCdp ? chatgptCdpReady : chatgptTokenConfigured
         const fp = fpDraft ?? status?.fingerprint ?? null
         const fpEditable = status?.fingerprint?.persistable === true
         const canSave = Boolean(token.trim() || cookies.trim())
@@ -615,6 +824,230 @@ nav button:has(.dsh-mm-navGlyph)>svg{display:none}
                 ),
               ),
             ),
+            status.chatgpt
+              ? h(
+                  'li',
+                  { className: 'dsh-mm-card' },
+                  h(
+                    'div',
+                    { className: 'dsh-mm-rowHead' },
+                    h('span', {
+                      className: `dsh-mm-dot ${chatgptReady ? 'on' : 'off'}`,
+                      'aria-hidden': true,
+                    }),
+                    h('span', { className: 'dsh-mm-name' }, t('chatgpt.title')),
+                    h(
+                      'span',
+                      { className: 'dsh-mm-rowMeta' },
+                      status.chatgpt.provider?.active ? t('status.active') : t('status.inactive'),
+                    ),
+                  ),
+                  h(
+                    'p',
+                    { className: 'dsh-mm-rowDesc' },
+                    chatgptViaCdp
+                      ? `${chatgptCdpReady ? t('chatgpt.cdpReady') : t('chatgpt.cdpMissing')} · ${t('chatgpt.descCdp')}`
+                      : `${chatgptTokenConfigured ? t('status.configured') : t('status.missing')}${
+                          chatgptTokenConfigured && sourceText(status.chatgpt.token)
+                            ? ` · ${sourceText(status.chatgpt.token)}`
+                            : ''
+                        } · ${t('chatgpt.desc')}`,
+                  ),
+                  status.chatgpt.lastFailure
+                    ? h(
+                        'p',
+                        { className: 'dsh-mm-lastFailure' },
+                        `${t('lastFailure.label')}：${status.chatgpt.lastFailure.code} · ${status.chatgpt.lastFailure.message}${
+                          formatTime(status.chatgpt.lastFailure.at) ? `（${formatTime(status.chatgpt.lastFailure.at)}）` : ''
+                        } — ${t('lastFailure.hint')}`,
+                      )
+                    : null,
+                  h(
+                    'div',
+                    { className: 'dsh-mm-editor' },
+                    h(
+                      'label',
+                      { className: 'dsh-mm-field', htmlFor: 'dsh-mm-chatgpt-token' },
+                      h('span', { className: 'dsh-mm-fieldLabel' }, t('chatgpt.paste')),
+                      h('input', {
+                        id: 'dsh-mm-chatgpt-token',
+                        className: 'dsh-mm-input',
+                        type: 'password',
+                        autoComplete: 'off',
+                        spellCheck: false,
+                        value: chatgptToken,
+                        placeholder: status.chatgpt.token?.configured
+                          ? t('token.placeholder.saved')
+                          : t('token.placeholder.empty'),
+                        onChange: (event) => setChatgptToken(event.target.value),
+                      }),
+                    ),
+                    h(
+                      'div',
+                      { className: 'dsh-mm-field' },
+                      h(
+                        'div',
+                        { className: 'dsh-mm-fieldHead' },
+                        h('label', { className: 'dsh-mm-fieldLabel', htmlFor: 'dsh-mm-chatgpt-cookie' }, t('cookie.label')),
+                        status.chatgpt.cookies?.configured ? h('span', { className: 'dsh-mm-tag' }, t('status.configured')) : null,
+                        h('span', { className: 'dsh-mm-spacer' }),
+                        status.chatgpt.cookies?.configured
+                          ? h(
+                              'button',
+                              {
+                                className: 'dsh-mm-link',
+                                type: 'button',
+                                disabled: Boolean(busy),
+                                onClick: clearChatgptCookie,
+                              },
+                              t('cookie.clear'),
+                            )
+                          : null,
+                      ),
+                      h('textarea', {
+                        id: 'dsh-mm-chatgpt-cookie',
+                        className: 'dsh-mm-textarea',
+                        value: chatgptCookies,
+                        placeholder: t('chatgpt.cookie.placeholder'),
+                        onChange: (event) => setChatgptCookies(event.target.value),
+                      }),
+                    ),
+                    h(
+                      'div',
+                      { className: 'dsh-mm-actions' },
+                      h(
+                        'button',
+                        {
+                          className: 'dsh-mm-button primary',
+                          type: 'button',
+                          disabled: Boolean(busy) || !canSaveChatgpt,
+                          onClick: saveChatgpt,
+                        },
+                        busy === 'chatgptSave' ? t('action.saving') : t('action.save'),
+                      ),
+                      h(
+                        'button',
+                        {
+                          className: 'dsh-mm-button',
+                          type: 'button',
+                          disabled: Boolean(busy) || !canTestChatgpt,
+                          onClick: testChatgpt,
+                        },
+                        busy === 'chatgptTest' ? t('action.testing') : t('action.test'),
+                      ),
+                      h(
+                        'button',
+                        {
+                          className: 'dsh-mm-button danger',
+                          type: 'button',
+                          disabled:
+                            Boolean(busy) ||
+                            (!status.chatgpt.token?.configured && !status.chatgpt.cookies?.configured),
+                          onClick: clearChatgpt,
+                        },
+                        busy === 'chatgptClear' ? t('action.clearing') : t('action.clear'),
+                      ),
+                    ),
+                  ),
+                  h(
+                    'div',
+                    { className: 'dsh-mm-field' },
+                    h(
+                      'div',
+                      { className: 'dsh-mm-fieldHead' },
+                      h('span', { className: 'dsh-mm-fieldLabel' }, t('transport.label')),
+                      h(
+                        'span',
+                        { className: 'dsh-mm-tag' },
+                        status.chatgpt.transport === 'cdp' ? t('transport.cdp') : t('transport.node'),
+                      ),
+                    ),
+                    h('p', { className: 'dsh-mm-hint' }, t('transport.desc')),
+                    h('p', { className: 'dsh-mm-hint' }, t('launch.hint')),
+                    h(
+                      'div',
+                      { className: 'dsh-mm-actions' },
+                      h(
+                        'button',
+                        {
+                          className: 'dsh-mm-button',
+                          type: 'button',
+                          disabled: Boolean(busy),
+                          onClick: launchChrome,
+                        },
+                        busy === 'launchChrome' ? t('launch.starting') : t('launch.action'),
+                      ),
+                    ),
+                    h(
+                      'div',
+                      { className: 'dsh-mm-actions' },
+                      h(
+                        'button',
+                        {
+                          className: 'dsh-mm-link',
+                          type: 'button',
+                          disabled: Boolean(busy) || status.chatgpt.transport !== 'cdp',
+                          onClick: () => setTransport('node'),
+                        },
+                        t('transport.useNode'),
+                      ),
+                      h(
+                        'button',
+                        {
+                          className: 'dsh-mm-link',
+                          type: 'button',
+                          disabled: Boolean(busy) || status.chatgpt.transport === 'cdp',
+                          onClick: () => setTransport('cdp'),
+                        },
+                        t('transport.useCdp'),
+                      ),
+                    ),
+                    status.chatgpt.cdp && (chatgptViaCdp || chatgptCdpReady)
+                      ? h(
+                          'p',
+                          { className: 'dsh-mm-hint' },
+                          status.chatgpt.cdp.reachable
+                            ? `${t('transport.reachable')} · ${status.chatgpt.cdp.browser ?? 'Chromium'} · ${status.chatgpt.cdp.host}:${status.chatgpt.cdp.port}`
+                            : `${t('transport.unreachable')} (${status.chatgpt.cdp.host}:${status.chatgpt.cdp.port})`,
+                        )
+                      : null,
+                    h(
+                      'details',
+                      { className: 'dsh-mm-details' },
+                      h('summary', { className: 'dsh-mm-summary' }, t('transport.howto')),
+                      h(
+                        'ol',
+                        { className: 'dsh-mm-steps' },
+                        h('li', null, t('transport.step1')),
+                        h(
+                          'li',
+                          null,
+                          t('transport.step2'),
+                          h(
+                            'code',
+                            { className: 'dsh-mm-code' },
+                            'chrome.exe --remote-debugging-port=9222 --user-data-dir="%LOCALAPPDATA%\\dsh-chrome"',
+                          ),
+                        ),
+                        h('li', null, t('transport.step3')),
+                      ),
+                    ),
+                  ),
+                  h(
+                    'details',
+                    { className: 'dsh-mm-details' },
+                    h('summary', { className: 'dsh-mm-summary' }, t('chatgpt.help.summary')),
+                    h(
+                      'ol',
+                      { className: 'dsh-mm-steps' },
+                      h('li', null, t('chatgpt.help.step1')),
+                      h('li', null, t('chatgpt.help.step2')),
+                      h('li', null, t('chatgpt.help.step3')),
+                      h('li', null, t('chatgpt.help.step4')),
+                    ),
+                  ),
+                )
+              : null,
             h(
               'li',
               { className: 'dsh-mm-card' },
@@ -622,17 +1055,17 @@ nav button:has(.dsh-mm-navGlyph)>svg{display:none}
                 'div',
                 { className: 'dsh-mm-rowHead' },
                 h('span', { className: 'dsh-mm-name' }, t('models.title')),
-                h('span', { className: 'dsh-mm-tag' }, String(models.length)),
+                h('span', { className: 'dsh-mm-tag' }, String(allModels.length)),
               ),
               h('p', { className: 'dsh-mm-rowDesc' }, t('models.note')),
-              models.length > 0
+              allModels.length > 0
                 ? h(
                     'ul',
                     { className: 'dsh-mm-modelList' },
-                    models.map((model) =>
+                    allModels.map((model) =>
                       h(
                         'li',
-                        { className: 'dsh-mm-modelRow', key: model.id },
+                        { className: 'dsh-mm-modelRow', key: `${model.provider}:${model.id}` },
                         h('span', {
                           className: `dsh-mm-dot ${model.routable ? 'on' : 'off'}`,
                           'aria-hidden': true,
@@ -643,7 +1076,7 @@ nav button:has(.dsh-mm-navGlyph)>svg{display:none}
                           h('div', { className: 'dsh-mm-modelName' }, model.name),
                           h('div', { className: 'dsh-mm-modelDesc' }, model.description),
                           !model.routable ? h('div', { className: 'dsh-mm-modelDesc' }, t('models.unavailable')) : null,
-                          status?.defaultSelection?.provider === status?.provider?.id &&
+                          status?.defaultSelection?.provider === model.provider &&
                           status?.defaultSelection?.model === model.id
                             ? h('div', { className: 'dsh-mm-modelDesc' }, t('models.currentDefault'))
                             : h(

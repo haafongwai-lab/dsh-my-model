@@ -213,4 +213,105 @@ assert.match(textOf(withFailure), /上次失败原因：STALE_SESSION/)
 assert.match(textOf(withFailure), /starting a fresh session\./)
 assert.match(textOf(withFailure), /my-model\.log/)
 
+// With a ChatGPT account in the payload the second account card appears next to
+// the DeepSeek one, and the model list covers both providers.
+stateQueue = [
+  {
+    provider: { id: 'deepseek-web', active: true },
+    token: { configured: true, source: 'managed' },
+    cookies: { configured: false },
+    models: [
+      { id: 'deepseek-web-chat', name: 'DeepSeek Web · Chat', description: 'chat', thinking: false, search: false, routable: true },
+    ],
+    defaultSelection: { provider: 'deepseek-web', model: 'deepseek-web-chat' },
+    chatgpt: {
+      provider: { id: 'chatgpt-web', name: 'My Model · ChatGPT Web', active: true },
+      token: { configured: true, source: 'managed' },
+      cookies: { configured: false },
+      models: [
+        {
+          id: 'chatgpt-web-chat',
+          name: 'ChatGPT Web · Chat',
+          description: 'chatgpt web chat',
+          thinking: false,
+          search: false,
+          routable: true,
+        },
+      ],
+      baseURL: 'https://chatgpt.com',
+      lastFailure: { code: 'INVALID_CREDENTIAL', message: 'HTTP 401', at: 1792313830728 },
+    },
+    lastTest: null,
+  },
+  '',
+  '',
+  '',
+  null,
+  '',
+  '',
+]
+stateIndex = 0
+const withChatgpt = section()
+assert.equal(findAll(withChatgpt, (node) => node.props.className === 'dsh-mm-card').length, 3, 'account cards plus models')
+assert.equal(findAll(withChatgpt, (node) => node.props.className === 'dsh-mm-modelRow').length, 2)
+assert.equal(
+  findAll(withChatgpt, (node) => node.type === 'input' && node.props.id === 'dsh-mm-chatgpt-token').length,
+  1,
+)
+assert.match(textOf(withChatgpt), /ChatGPT 网页版账号/)
+assert.match(textOf(withChatgpt), /上次失败原因：INVALID_CREDENTIAL/)
+
+// In CDP mode the browser tab holds the session, so the test button must stay
+// clickable even with no token and no cookie configured (a reported regression:
+// it stayed disabled and the mode looked broken).
+stateQueue = [
+  {
+    provider: { id: 'deepseek-web', active: true },
+    token: { configured: true, source: 'managed' },
+    cookies: { configured: false },
+    models: [
+      { id: 'deepseek-web-chat', name: 'DeepSeek Web · Chat', description: 'chat', thinking: false, search: false, routable: true },
+    ],
+    defaultSelection: { provider: 'deepseek-web', model: 'deepseek-web-chat' },
+    chatgpt: {
+      provider: { id: 'chatgpt-web', name: 'My Model · ChatGPT Web', active: true },
+      token: { configured: false },
+      cookies: { configured: false },
+      models: [
+        { id: 'chatgpt-web-chat', name: 'ChatGPT Web', description: 'chatgpt default', thinking: false, search: false, routable: true },
+      ],
+      transport: 'cdp',
+      cdp: { host: '127.0.0.1', port: 9222, reachable: true, browser: 'Chrome/155.0.8059.84' },
+      lastTest: null,
+    },
+    lastTest: null,
+  },
+  '',
+  '',
+  '',
+  null,
+  '',
+  '',
+  '',
+]
+stateIndex = 0
+const withCdp = section()
+const chatgptCard = findAll(withCdp, (node) => node.props.className === 'dsh-mm-card')[1]
+assert.ok(chatgptCard, 'the ChatGPT card is rendered')
+const testButton = findAll(chatgptCard, (node) => node.type === 'button' && textOf(node) === '测试连接')[0]
+assert.ok(testButton, 'the ChatGPT card exposes a test button')
+assert.equal(testButton.props.disabled, false, 'the test button is clickable in CDP mode without credentials')
+assert.match(textOf(chatgptCard), /已连上 Chrome/)
+assert.match(textOf(chatgptCard), /可以留空/)
+
+// One click must be enough to get the debug browser: the launcher lives on the
+// ChatGPT card, works without any pasted credential, and says what it will do.
+const launchButton = findAll(
+  chatgptCard,
+  (node) => node.type === 'button' && textOf(node) === '一键启动本地 Chrome',
+)[0]
+assert.ok(launchButton, 'the ChatGPT card exposes the one-click Chrome launcher')
+assert.equal(launchButton.props.disabled, false, 'the launcher needs no token or cookie')
+assert.match(textOf(chatgptCard), /独立配置目录/, 'the launcher explains the dedicated profile')
+
 console.log('ui-smoke: ok')
