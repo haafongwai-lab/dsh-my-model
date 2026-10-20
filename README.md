@@ -72,12 +72,13 @@ reported message tells you what to paste and from where.
 chatgpt.com scores the TLS/JA3 fingerprint and HTTP version, which Node's
 `fetch` cannot imitate — a perfectly valid token still gets
 `403 {"detail":"Unusual activity has been detected from your device."}`. The
-settings page therefore offers two transports:
+settings page therefore offers three transports:
 
 | Transport | What it does | When to use |
 | --- | --- | --- |
 | Node fetch (default) | The host sends the request itself | First attempt; works when the IP and fingerprint are not questioned |
 | Local Chrome | Runs the same `fetch` **inside your logged-in chatgpt.com tab** over CDP | When Node fetch is rejected as unusual activity |
+| Managed headless Chromium | Runs the same tab in a background, always-on headless Chromium on its own profile and port | When calls must keep working after every visible Chrome window is closed |
 
 #### One-click launch
 
@@ -131,6 +132,62 @@ reports `turnstile.required`, the request cannot be replayed by any client, so
 the plugin drives the tab's own composer (type, click send, read the reply from
 the page) and lets the site supply the proof — see *Known limits* below. The
 choice is persisted per profile in `<profile>/.my-model-chatgpt.json`.
+
+#### Managed headless Chromium
+
+**Settings → My Model → ChatGPT → Start managed headless Chromium** starts (or
+adopts) a background Chromium on a dedicated profile and switches the transport
+to it. It stays running when every visible Chrome window is closed, and a
+Harness restart adopts the still-running instance instead of starting a second
+one.
+
+- Default port `9224`, profile `%LOCALAPPDATA%\dsh-chrome-headless-chatgpt`
+  (config keys `chatgptHeadlessPort`, `chatgptHeadlessHost`,
+  `chatgptHeadlessUserDataDir`).
+- The headless profile does **not** share the visible Chrome login. Launching
+  copies the chatgpt.com cookies (including `cf_clearance`) from the local-Chrome
+  endpoint when it is reachable; otherwise paste the cookie string in the card
+  first. Cookies land in the normal credential store.
+- Headless Chrome normally sends `HeadlessChrome/…` in its User-Agent, and
+  Cloudflare binds `cf_clearance` to the exact UA that obtained it. The client
+  therefore overrides the UA with the configured fingerprint and reloads the
+  page once before making requests. Without that, the page lands on the
+  "请稍候…" interstitial even though the cookies are valid.
+- The composer path works in headless Chromium; the plugin enables focus
+  emulation and inserts text with `execCommand("insertText")`, because a
+  synthetic paste event is ignored without a focused window.
+- Cold start is slower than the visible browser, so the first turn allows up to
+  ~45 s for the app shell and composer to appear.
+
+### DeepSeek Web over local Chrome or managed headless Chromium
+
+The DeepSeek card has the same switch. **Local Chrome** runs the PoW challenge,
+session creation, and the completion SSE inside a signed-in
+`chat.deepseek.com` tab, using that tab's TLS stack, cookies, and client hints.
+If no token was pasted, the plugin reads `userToken` from the tab's
+`localStorage`. It also copies the browser cookies into the Node cookie jar.
+
+Unlike the ChatGPT local-Chrome transport, this one never requires the window to
+stay open: if the debug port disappears, the tab is closed, or Chrome is closed,
+the same call is sent over Node `fetch` with the cached token and synced
+cookies. A Harness turn therefore keeps working with Chrome closed. The choice
+is persisted in `<profile>/.my-model-deepseek.json`. Relevant config keys are
+`deepseekTransport` (`node` / `cdp` / `headless`), `deepseekCdpPort` (default
+`9222`), and `deepseekCdpHost` (default `127.0.0.1`).
+
+**Managed headless Chromium** is the Node-free option: it starts a detached
+headless Chromium on its own profile and port (`9223` by default), seeds the
+stored token/cookies into it, and keeps it running. Closing every visible
+Chrome window therefore does not affect calls, and this transport never falls
+back to Node. It starts on the first request (or from the settings button),
+survives a Harness restart by adopting the still-listening debug port, and
+requires a saved token (or one synced once through local Chrome). Its config
+keys are `deepseekHeadlessPort`, `deepseekHeadlessHost`, and
+`chromeHeadlessUserDataDir`.
+
+ChatGPT runs a **separate** managed Chromium (port `9224`, profile
+`dsh-chrome-headless-chatgpt`) because it must hold a chatgpt.com login, not a
+DeepSeek one. Starting one never starts or disturbs the other.
 
 ## Models
 
@@ -258,19 +315,30 @@ The bundle patch writes `config: {}`. Every field is optional:
     clientVersion: 2.5.0
     tokenEnv: DEEPSEEK_WEB_TOKEN
     cookiesEnv: DEEPSEEK_WEB_COOKIES
+    deepseekTransport: node          # node | cdp | headless
+    deepseekCdpPort: 9222
+    deepseekCdpHost: 127.0.0.1
+    deepseekHeadlessPort: 9223
+    deepseekHeadlessHost: 127.0.0.1
     # ChatGPT web account
     chatgptBaseURL: https://chatgpt.com
     chatgptTokenEnv: CHATGPT_WEB_TOKEN
     chatgptCookiesEnv: CHATGPT_WEB_COOKIES
     chatgptModelSlug: gpt-6-luna
     chatgptLanguage: zh-CN
-    chatgptTransport: node          # node | cdp
+    chatgptTransport: node          # node | cdp | headless
     chatgptCdpPort: 9222
     chatgptCdpHost: 127.0.0.1
+    # The ChatGPT managed Chromium has its own port and profile so it never
+    # competes with the DeepSeek one or with the visible debug browser.
+    chatgptHeadlessPort: 9224
+    chatgptHeadlessHost: 127.0.0.1
+    chatgptHeadlessUserDataDir: ""  # default: <dsh-chrome-headless>-chatgpt
     # One-click "Launch local Chrome". Empty means auto-detect the browser and
     # use the platform's default dsh-chrome profile directory.
     chromePath: ""
     chromeUserDataDir: ""
+    chromeHeadlessUserDataDir: ""
     # Shared by both accounts
     timeoutMs: 300000
     maxPromptChars: 1000000
@@ -295,6 +363,12 @@ transcript builder works in characters, `maxPromptChars` stays at 1,000,000
 characters — roughly the same budget for CJK text, and a conservative budget
 for Latin text — so a single oversized message is truncated instead of being
 rejected by the upstream.
+
+The ChatGPT composer path is the exception: its transcript is capped at
+**120,000 characters** regardless of `maxPromptChars`, and a longer prompt fails
+fast with `PROMPT_TOO_LONG`. A few hundred thousand characters in the page
+composer is enough to stop the tab from answering the debugger (see *Known
+limits* below), so this ceiling is not configurable upward.
 
 The token and cookie are stored through the Harness credential service under
 `tokenEnv` / `cookiesEnv`; they are not written into `cordis.patch.yml`.
@@ -465,6 +539,17 @@ after the next successful turn on that account.
   700 ms; completion comes from `data-talvt-turn-state="complete"` (or the
   disappearance of the stop button), a reply that has not started within 30 s
   fails in-turn with the page's counters, and the whole poll is capped at 180 s.
+- **The composer is replaced every turn, and a stuck page fails fast.** The page
+  saves whatever is in the composer as a draft. The first implementation pasted
+  on top of that draft, so prompts accumulated across turns; at roughly 480,000
+  characters the tab stopped answering CDP calls entirely and every later turn
+  looked frozen for minutes (navigation, probes and reads all timed out, and the
+  draft came back on every reload). The composer is now cleared before each
+  insert and before each navigation, one prompt is capped at 120,000 characters,
+  a click is confirmed by the editor emptying, and three unanswerable CDP calls
+  in a row abort the turn with `TAB_UNRESPONSIVE` instead of retrying. To recover
+  a tab that is already wedged: close that chatgpt.com tab (or quit and relaunch
+  the debug Chrome) and clear its site data if the draft is restored.
 - **A new conversation per turn.** In composer mode the plugin always sends from
   a fresh chat and replays the whole transcript, because the page's UI owns the
   conversation id. That is correct, but it costs more tokens than the Node

@@ -189,6 +189,37 @@ export async function probeCdp({ host = DEFAULT_HOST, port = DEFAULT_PORT, timeo
   }
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Wait until the attached page has committed the requested origin. A newly
+ * opened `/json/new` tab is briefly `about:blank`; an in-page fetch from there
+ * would be cross-origin and would not carry the DeepSeek cookies.
+ */
+export async function waitForPageOrigin(connection, origin, { timeoutMs = 5000, intervalMs = 100 } = {}) {
+  let wanted
+  try {
+    wanted = new URL(String(origin)).origin
+  } catch {
+    return false
+  }
+  const deadline = Date.now() + Math.max(200, Number(timeoutMs) || 5000)
+  while (Date.now() < deadline) {
+    try {
+      const result = await connection.send(
+        'Runtime.evaluate',
+        { expression: 'location.origin', returnByValue: true },
+        1500,
+      )
+      if (result?.result?.value === wanted) return true
+    } catch {
+      // The execution context can disappear while the document navigates.
+    }
+    await sleep(Math.max(25, Number(intervalMs) || 100))
+  }
+  return false
+}
+
 /**
  * Find (or open) a page target on `origin` and attach to it.
  * Chrome ≥ 111 requires PUT for `/json/new`; older builds accept GET, so both
@@ -205,9 +236,21 @@ export async function attachPage({ host = DEFAULT_HOST, port = DEFAULT_PORT, ori
     throw error
   }
   if (!Array.isArray(targets)) throw new CdpError('Chrome returned no target list.', 'BAD_TARGETS')
-  let target = targets.find(
-    (entry) => entry?.type === 'page' && typeof entry.url === 'string' && entry.url.startsWith(wanted),
-  )
+  let wantedOrigin
+  try {
+    wantedOrigin = new URL(wanted).origin
+  } catch {
+    wantedOrigin = undefined
+  }
+  const sameOrigin = (value) => {
+    if (!wantedOrigin) return false
+    try {
+      return new URL(String(value)).origin === wantedOrigin
+    } catch {
+      return false
+    }
+  }
+  let target = targets.find((entry) => entry?.type === 'page' && sameOrigin(entry.url))
   if (!target) {
     const openUrl = `${endpoint}/json/new?${encodeURIComponent(wanted + '/')}`
     for (const method of ['PUT', 'GET']) {
@@ -232,12 +275,41 @@ export async function attachPage({ host = DEFAULT_HOST, port = DEFAULT_PORT, ori
   }
   const connection = await CdpConnection.open(target.webSocketDebuggerUrl, { timeoutMs })
   await connection.send('Runtime.enable')
+  let ready = await waitForPageOrigin(connection, wanted, { timeoutMs: Math.min(timeoutMs, 5000) })
+  if (!ready) {
+    // An existing tab may be on about:blank or another document; nudge it to
+    // the requested origin once and wait for the navigation to commit.
+    try {
+      await connection.send(
+        'Runtime.evaluate',
+        {
+          expression: `location.assign(${JSON.stringify(wanted + '/')}); undefined`,
+          returnByValue: true,
+        },
+        2000,
+      )
+    } catch {
+      // The wait below reports the useful failure.
+    }
+    ready = await waitForPageOrigin(connection, wanted, { timeoutMs: 5000 })
+  }
+  if (!ready) {
+    try {
+      connection.close()
+    } catch {
+      // Ignore.
+    }
+    throw new CdpError(
+      `The Chrome tab did not reach ${wanted}. Open that page in the debug Chrome window and retry.`,
+      'NO_TARGET',
+    )
+  }
   return { connection, target: { id: target.id, url: target.url, title: target.title } }
 }
 
 /**
  * Evaluate a fetch inside the page and collect the response as text.
- * @returns {Promise<{status:number, contentType:string, text:string}>}
+ * @returns {Promise<{status:number, contentType:string, text:string, headers:Record<string,string>}>}
  */
 export async function fetchInPage(connection, path, { method = 'GET', headers = {}, body, timeoutMs = 60000 } = {}) {
   const expression = buildJsonExpression(path, { method, headers, body })
@@ -255,10 +327,12 @@ export async function fetchInPage(connection, path, { method = 'GET', headers = 
   }
   const value = result?.result?.value
   if (!value || typeof value !== 'object') throw new CdpError('The in-page request returned nothing.', 'EMPTY_RESULT')
+  const responseHeaders = value.headers && typeof value.headers === 'object' ? value.headers : {}
   return {
     status: Number(value.status) || 0,
-    contentType: String(value.contentType ?? ''),
+    contentType: String(value.contentType ?? responseHeaders['content-type'] ?? ''),
     text: String(value.text ?? ''),
+    headers: responseHeaders,
   }
 }
 
@@ -272,10 +346,12 @@ function buildJsonExpression(path, { method, headers, body }) {
     '      credentials: "include",',
     body === undefined ? '' : `      body: ${JSON.stringify(JSON.stringify(body))},`,
     '    });',
+    '    const headers = {};',
+    '    response.headers.forEach((value, key) => { headers[key] = value; });',
     '    const text = await response.text();',
-    '    return { status: response.status, contentType: response.headers.get("content-type") || "", text };',
+    '    return { status: response.status, contentType: response.headers.get("content-type") || "", text, headers };',
     '  } catch (error) {',
-    '    return { status: 0, contentType: "", text: String(error && error.message ? error.message : error) };',
+    '    return { status: 0, contentType: "", text: String(error && error.message ? error.message : error), headers: {} };',
     '  }',
     '})()',
   ]
@@ -289,8 +365,16 @@ const DONE_MARK = '\u0000__dsh_cdp_done__'
 /**
  * Stream an SSE endpoint from inside the page. Each `data:` line is pushed back
  * over a CDP binding so the adapter keeps its streaming behaviour.
+ *
+ * `raw` skips JSON decoding and yields each non-empty SSE line (`event:`,
+ * `data:`, or a bare JSON line). DeepSeek uses event names, so it needs the raw
+ * form; ChatGPT uses the decoded JSON form.
  */
-export async function* streamInPage(connection, path, { method = 'POST', headers = {}, body, signal } = {}) {
+export async function* streamInPage(
+  connection,
+  path,
+  { method = 'POST', headers = {}, body, signal, raw = false } = {},
+) {
   const chunks = []
   let notify = null
   let finished = false
@@ -317,7 +401,7 @@ export async function* streamInPage(connection, path, { method = 'POST', headers
   })
 
   await connection.send('Runtime.addBinding', { name: BINDING_NAME })
-  const expression = buildStreamExpression(path, { method, headers, body })
+  const expression = buildStreamExpression(path, { method, headers, body, raw })
   const evaluation = connection.send(
     'Runtime.evaluate',
     { expression, awaitPromise: true, returnByValue: true, userGesture: true },
@@ -342,6 +426,10 @@ export async function* streamInPage(connection, path, { method = 'POST', headers
     while (true) {
       if (chunks.length > 0) {
         const payload = chunks.shift()
+        if (raw) {
+          if (payload !== '') yield payload
+          continue
+        }
         let frame
         try {
           frame = JSON.parse(payload)
@@ -369,7 +457,12 @@ export async function* streamInPage(connection, path, { method = 'POST', headers
     const value = result?.result?.value
     if (value && value.ok === false) {
       throw new CdpError(
-        JSON.stringify({ status: value.status, contentType: value.contentType, text: value.text ?? '' }),
+        JSON.stringify({
+          status: value.status,
+          contentType: value.contentType,
+          text: value.text ?? '',
+          headers: value.headers ?? {},
+        }),
         'HTTP_ERROR',
       )
     }
@@ -378,7 +471,7 @@ export async function* streamInPage(connection, path, { method = 'POST', headers
   }
 }
 
-function buildStreamExpression(path, { method, headers, body }) {
+function buildStreamExpression(path, { method, headers, body, raw = false }) {
   return [
     '(async () => {',
     `  const send = window[${JSON.stringify(BINDING_NAME)}];`,
@@ -391,9 +484,11 @@ function buildStreamExpression(path, { method, headers, body }) {
     body === undefined ? '' : `      body: ${JSON.stringify(JSON.stringify(body))},`,
     '    });',
     '    const contentType = response.headers.get("content-type") || "";',
+    '    const headers = {};',
+    '    response.headers.forEach((value, key) => { headers[key] = value; });',
     '    if (!response.ok || contentType.indexOf("text/event-stream") < 0) {',
     '      const text = await response.text().catch(() => "");',
-    '      return { ok: false, status: response.status, contentType, text: text.slice(0, 400) };',
+    '      return { ok: false, status: response.status, contentType, text: text.slice(0, 400), headers };',
     '    }',
     '    const reader = response.body.getReader();',
     '    const decoder = new TextDecoder();',
@@ -406,22 +501,51 @@ function buildStreamExpression(path, { method, headers, body }) {
     '      while ((index = buffer.indexOf("\\n")) >= 0) {',
     '        const line = buffer.slice(0, index).replace(/\\r$/, "");',
     '        buffer = buffer.slice(index + 1);',
-    '        if (line.indexOf("data:") === 0) {',
-    '          const payload = line.slice(5).trim();',
-    '          if (payload && payload !== "[DONE]") emit(payload);',
-    '        }',
+    raw
+      ? '        if (line !== "" && line.charAt(0) !== ":") emit(line);'
+      : '        if (line.indexOf("data:") === 0) {\n' +
+        '          const payload = line.slice(5).trim();\n' +
+        '          if (payload && payload !== "[DONE]") emit(payload);\n' +
+        '        }',
     '      }',
     '    }',
     `    emit(${JSON.stringify(DONE_MARK)});`,
-    '    return { ok: true, status: response.status, contentType };',
+    '    return { ok: true, status: response.status, contentType, headers };',
     '  } catch (error) {',
     `    emit(${JSON.stringify(DONE_MARK)});`,
-    '    return { ok: false, status: 0, contentType: "", text: String(error && error.message ? error.message : error) };',
+    '    return { ok: false, status: 0, contentType: "", text: String(error && error.message ? error.message : error), headers: {} };',
     '  }',
     '})()',
   ]
     .filter(Boolean)
     .join('\n')
+}
+
+/**
+ * Read the browser's cookies for one origin over CDP. In-page fetches already
+ * use them; the Node fallback needs the same set when Chrome is closed.
+ * @returns {Promise<string>} a `name=value; …` header, or an empty string.
+ */
+export async function getCookies(connection, urls) {
+  try {
+    // Network.getCookies is available without enable in some builds; enabling
+    // first makes it reliable across Chromium versions. A failure here only
+    // costs the cookie copy, never the request.
+    try {
+      await connection.send('Network.enable', {}, 1500)
+    } catch {
+      // Older/limited targets may refuse; try getCookies anyway.
+    }
+    const result = await connection.send('Network.getCookies', { urls: urls.map(String) }, 1500)
+    const cookies = Array.isArray(result?.cookies) ? result.cookies : []
+    return cookies
+      .filter((cookie) => cookie && typeof cookie.name === 'string')
+      .map((cookie) => `${cookie.name}=${cookie.value ?? ''}`)
+      .join('; ')
+  } catch (error) {
+    if (error?.code === 'CLOSED') throw error
+    return ''
+  }
 }
 
 /** Close a page connection (best effort). */
@@ -460,72 +584,167 @@ const ASSISTANT_SELECTOR = [
 const ASSISTANT_SELECTOR_JSON = JSON.stringify(ASSISTANT_SELECTOR)
 
 /**
- * Navigate the attached tab to a fresh chat. The plugin always sends from its
- * own tab and starts a new conversation per turn, so it never types into a
- * conversation the user is looking at.
+ * Hard ceiling for one composer turn.
+ *
+ * A prompt left in the composer is saved as a draft by the site. It comes back
+ * on every reload, and at a few hundred thousand characters the page stops
+ * answering CDP calls entirely — the tab looks frozen and every evaluate times
+ * out. That was the "ChatGPT Web freezes the Harness" failure, so the limit is
+ * enforced in two places (here and in `chatgpt-web.js`) and the editor is
+ * cleared before every insert.
  */
-export async function composerNavigate(connection, url) {
+export const COMPOSER_PROMPT_LIMIT = 120_000
+
+/** Navigate the attached tab to a fresh chat, clearing any leftover draft first. */
+export async function composerNavigate(connection, url, { timeoutMs = 10000 } = {}) {
   const target = String(url || 'https://chatgpt.com').replace(/\/+$/, '') + '/'
-  await connection.send('Runtime.evaluate', {
-    expression: `location.assign(${JSON.stringify(target)}); undefined`,
-    returnByValue: true,
-  })
-}
-
-/** Whether the composer is ready after a navigation, plus what the page shows. */
-export async function composerProbe(connection) {
-  const expression = [
-    '(() => ({',
-    "  ready: Boolean(document.querySelector('#prompt-textarea') || document.querySelector('div[contenteditable=\"true\"]')),",
-    '  href: location.href,',
-    `  replies: document.querySelectorAll(${ASSISTANT_SELECTOR_JSON}).length,`,
-    "  streaming: Boolean(document.querySelector('[data-testid=\"stop-button\"]')),",
-    '}))()',
-  ].join('\n')
-  const result = await connection.send('Runtime.evaluate', { expression, returnByValue: true })
-  return result.result.value ?? { ready: false, replies: 0, streaming: false }
-}
-
-/** Insert the prompt text into the composer (no send). */
-export async function composerInsert(connection, { prompt } = {}) {
   const expression = [
     '(() => {',
+    '  // A large draft left in the editor makes the navigation itself wedge the tab,',
+    '  // so drop it before leaving the current document.',
+    '  const composer = document.querySelector("#prompt-textarea") || document.querySelector(\'div[contenteditable="true"]\');',
+    '  if (composer) {',
+    '    composer.focus();',
+    '    const selection = window.getSelection();',
+    '    const range = document.createRange();',
+    '    range.selectNodeContents(composer);',
+    '    selection.removeAllRanges();',
+    '    selection.addRange(range);',
+    '    document.execCommand("delete");',
+    '  }',
+    `  location.assign(${JSON.stringify(target)});`,
+    '  return undefined;',
+    '})()',
+  ].join('\n')
+  await connection.send('Runtime.evaluate', { expression, returnByValue: true, userGesture: true }, timeoutMs)
+}
+
+/**
+ * Whether the composer is ready after a navigation, plus what the page shows.
+ * `draft` is the current composer length: the caller uses it to detect a page
+ * that restored an oversized draft and to confirm a click actually submitted.
+ */
+export async function composerProbe(connection, { timeoutMs = 5000 } = {}) {
+  const expression = [
+    '(() => {',
+    "  const composer = document.querySelector('#prompt-textarea') || document.querySelector('div[contenteditable=\"true\"]');",
+    '  return {',
+    '    ready: Boolean(composer),',
+    '    href: location.href,',
+    '    draft: composer ? String(composer.innerText || "").length : 0,',
+    `    replies: document.querySelectorAll(${ASSISTANT_SELECTOR_JSON}).length,`,
+    "    streaming: Boolean(document.querySelector('[data-testid=\"stop-button\"]')),",
+    '  };',
+    '})()',
+  ].join('\n')
+  const result = await connection.send('Runtime.evaluate', { expression, returnByValue: true }, timeoutMs)
+  checkEvaluate(result)
+  return result.result.value ?? { ready: false, replies: 0, streaming: false, draft: 0 }
+}
+
+/**
+ * Replace the composer's contents with `prompt` (no send). Whatever a previous
+ * turn, or the site's restored draft, left behind is deleted first; otherwise
+ * prompts accumulate until the page dies.
+ */
+export async function composerInsert(connection, { prompt, timeoutMs = 20000 } = {}) {
+  const text = String(prompt ?? '')
+  if (text.length > COMPOSER_PROMPT_LIMIT) {
+    return {
+      ok: false,
+      code: 'PROMPT_TOO_LONG',
+      message: `the prompt is ${text.length} characters, over the ${COMPOSER_PROMPT_LIMIT}-character page limit`,
+    }
+  }
+  const expression = [
+    '(async () => {',
     '  const composer = document.querySelector("#prompt-textarea") || document.querySelector(\'div[contenteditable="true"]\');',
     '  if (!composer) return { ok: false, message: "composer not found — open chatgpt.com in that tab and wait for it to load" };',
+    '  const before = String(composer.innerText || "").length;',
     '  // Mark the replies that already exist, so an older answer (a lingering',
     '  // conversation, a page that has not finished navigating) is never mistaken',
     '  // for the answer to this turn.',
     `  const replies = [...document.querySelectorAll(${ASSISTANT_SELECTOR_JSON})];`,
     '  for (const node of replies) node.setAttribute("data-dsh-seen", "1");',
-    '  const before = replies.length;',
+    '  const count = replies.length;',
+    '  // Replace the composer contents instead of appending to them. A draft from',
+    '  // an earlier turn is large enough to wedge the page when it is navigated',
+    '  // away, so never leave one behind.',
     '  composer.focus();',
+    '  const selection = window.getSelection();',
+    '  const range = document.createRange();',
+    '  range.selectNodeContents(composer);',
+    '  selection.removeAllRanges();',
+    '  selection.addRange(range);',
+    '  document.execCommand("delete");',
+    '  // ProseMirror rebuilds the empty paragraph on the next tick; pasting in the',
+    '  // same task is silently dropped.',
+    '  await new Promise((resolve) => setTimeout(resolve, 100));',
+    '  // Clearing can make the editor re-render, so re-query it before pasting;',
+    '  // the old node may be detached by now.',
+    '  const editor = document.querySelector("#prompt-textarea") || document.querySelector(\'div[contenteditable="true"]\');',
+    '  if (!editor) return { ok: false, message: "the composer disappeared after clearing it" };',
+    '  const leftover = String(editor.innerText || "").length;',
+    '  if (leftover > 2) {',
+    '    return { ok: false, message: "the composer still holds text after clearing it", leftover };',
+    '  }',
+    '  editor.focus();',
+    '  // Put the caret back at the end: after deleting a select-all range the editor',
+    '  // has no insertion point, and the synthetic paste would be ignored.',
+    '  const caret = window.getSelection();',
+    '  const end = document.createRange();',
+    '  end.selectNodeContents(editor);',
+    '  end.collapse(false);',
+    '  caret.removeAllRanges();',
+    '  caret.addRange(end);',
     '  const transfer = new DataTransfer();',
-    `  transfer.setData("text/plain", ${JSON.stringify(String(prompt ?? ''))});`,
-    '  composer.dispatchEvent(new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }));',
-    '  const inserted = String(composer.innerText || "").trim();',
+    `  transfer.setData("text/plain", ${JSON.stringify(text)});`,
+    '  // `insertText` behaves like real typing and works in headless Chromium,',
+    '  // where a synthetic paste event is ignored. Keep paste as a fallback for',
+    '  // editors that do not implement execCommand.',
+    '  try { document.execCommand("insertText", false, ' + JSON.stringify(text) + '); } catch { /* fall through */ }',
+    '  let inserted = String(editor.innerText || "").trim();',
+    '  if (!inserted) {',
+    '    editor.dispatchEvent(new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }));',
+    '    inserted = String(editor.innerText || "").trim();',
+    '  }',
     '  if (!inserted) return { ok: false, message: "the composer did not accept the text" };',
-    '  return { ok: true, before, inserted: inserted.slice(0, 60) };',
+    '  return { ok: true, before, cleared: leftover, count, expected: ' + text.length + ', length: inserted.length, inserted: inserted.slice(0, 60) };',
     '})()',
   ].join('\n')
-  const result = await connection.send('Runtime.evaluate', { expression, returnByValue: true, userGesture: true })
+  const result = await connection.send(
+    'Runtime.evaluate',
+    { expression, returnByValue: true, userGesture: true, awaitPromise: true },
+    timeoutMs,
+  )
   checkEvaluate(result)
   return result.result.value
 }
 
-/** Click the send button once it has appeared (it renders only with content). */
-export async function composerSend(connection) {
+/**
+ * Click the send button. The live page has used several shapes for it over
+ * time, and the old `[data-testid="send-button"]` lookup alone silently found
+ * nothing; locate it by test id, accessible label, or the form's submit button.
+ */
+export async function composerSend(connection, { timeoutMs = 5000 } = {}) {
   const expression = [
     '(() => {',
     '  const composer = document.querySelector(\'div[contenteditable="true"]\');',
     '  const form = composer ? composer.closest("form") : document;',
-    '  const button = document.querySelector(\'[data-testid="send-button"]\') || form.querySelector(\'button[type="submit"]\');',
-    '  if (!button) return { clicked: false };',
-    '  if (button.disabled) return { clicked: false, disabled: true };',
+    '  const button = document.querySelector(\'[data-testid="send-button"]\') ||',
+    '    document.querySelector(\'button[aria-label="发送"], button[aria-label="Send"], button[aria-label="Send message"]\') ||',
+    '    (form ? form.querySelector(\'button[type="submit"]\') : null);',
+    '  if (!button) return { clicked: false, reason: "no send button" };',
+    '  if (button.disabled) return { clicked: false, disabled: true, reason: "send button is disabled" };',
     '  button.click();',
-    '  return { clicked: true };',
+    '  return { clicked: true, label: button.getAttribute("aria-label") || button.getAttribute("data-testid") || "submit" };',
     '})()',
   ].join('\n')
-  const result = await connection.send('Runtime.evaluate', { expression, returnByValue: true, userGesture: true })
+  const result = await connection.send(
+    'Runtime.evaluate',
+    { expression, returnByValue: true, userGesture: true },
+    timeoutMs,
+  )
   checkEvaluate(result)
   return result.result.value
 }
@@ -542,7 +761,7 @@ export async function composerSend(connection) {
  * The prefix "ChatGPT 说：" is UI chrome, not answer text, and is stripped — as
  * is a bare "Thinking…" placeholder, which is not a reply either.
  */
-export async function composerRead(connection, before) {
+export async function composerRead(connection, before, { timeoutMs = 5000 } = {}) {
   const expression = [
     '(() => {',
     `  const before = ${Number(before) || 0};`,
@@ -564,7 +783,7 @@ export async function composerRead(connection, before) {
     '  return { text, state, declared, ...counts };',
     '})()',
   ].join('\n')
-  const result = await connection.send('Runtime.evaluate', { expression, returnByValue: true })
+  const result = await connection.send('Runtime.evaluate', { expression, returnByValue: true }, timeoutMs)
   checkEvaluate(result)
   return result.result.value
 }

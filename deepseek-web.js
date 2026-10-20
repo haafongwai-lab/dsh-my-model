@@ -9,6 +9,7 @@
 import { createHash } from 'node:crypto'
 import { buildTranscriptPrompt, deltaPrompt, normalizeToken, parseDsmlToolCalls, StreamSieve } from './dsml.js'
 import { solvePow } from './pow.js'
+import { CdpError, attachPage, fetchInPage, getCookies, streamInPage } from './chrome-cdp.js'
 
 export { normalizeToken } from './dsml.js'
 
@@ -124,6 +125,122 @@ export class AdapterError extends Error {
 
 function retryable(error) {
   return error instanceof AdapterError && INTERNAL_RETRY_CODES.has(error.code)
+}
+
+/** A Response-shaped object for code that only reads status/headers/body. */
+class CdpResponse {
+  constructor({ status = 0, contentType = '', text = '', headers = {}, body = null } = {}) {
+    this.status = Number(status) || 0
+    this.ok = this.status >= 200 && this.status < 300
+    this.body = body
+    this._text = String(text ?? '')
+    const lower = {}
+    for (const [key, value] of Object.entries(headers && typeof headers === 'object' ? headers : {})) {
+      lower[String(key).toLowerCase()] = String(value)
+    }
+    if (contentType && !lower['content-type']) lower['content-type'] = String(contentType)
+    this.headers = {
+      get: (name) => lower[String(name).toLowerCase()] ?? null,
+    }
+  }
+
+  async text() {
+    return this._text
+  }
+
+  async json() {
+    return JSON.parse(this._text)
+  }
+}
+
+/** A minimal Response-shaped object for `httpError`, which only reads status/headers. */
+function responseLike(status, headers = {}) {
+  const lower = {}
+  for (const [key, value] of Object.entries(headers)) lower[String(key).toLowerCase()] = value
+  return { status, headers: { get: (name) => lower[String(name).toLowerCase()] ?? null } }
+}
+
+const CDP_HINTS = {
+  UNREACHABLE:
+    ' Start Chrome with --remote-debugging-port=9222 --user-data-dir=<a dedicated profile>, sign in to ' +
+    'chat.deepseek.com in that window, and keep it running.',
+  NO_TARGET: ' Open chat.deepseek.com in that Chrome window and retry.',
+  NO_WEBSOCKET: ' This runtime has no WebSocket, so the CDP transport cannot be used.',
+}
+
+/** Turn a CDP failure into a provider-neutral AdapterError. */
+function cdpErrorToAdapter(error) {
+  if (error instanceof AdapterError) return error
+  if (!(error instanceof CdpError)) return error
+  const code =
+    error.code === 'TIMEOUT'
+      ? 'TIMEOUT'
+      : error.code === 'ABORTED'
+        ? 'ABORTED'
+        : error.code === 'NO_TARGET'
+          ? 'CDP_NO_TARGET'
+          : error.code === 'UNREACHABLE' || error.code === 'NO_WEBSOCKET'
+            ? 'CDP_UNAVAILABLE'
+            : 'TRANSPORT'
+  return new AdapterError(`Chrome CDP: ${error.message}${CDP_HINTS[error.code] ?? ''}`, code)
+}
+
+const CDP_FALLBACK_CODES = new Set([
+  'UNREACHABLE',
+  'NO_TARGET',
+  'NO_WEBSOCKET',
+  'CONNECT_FAILED',
+  'CLOSED',
+  'EVAL_FAILED',
+  'EMPTY_RESULT',
+  'CDP_ERROR',
+  'SEND_FAILED',
+  'TIMEOUT',
+])
+
+/** Whether a CDP failure happened before any request reached the page. */
+function canFallbackFromCdp(error) {
+  return error instanceof CdpError && CDP_FALLBACK_CODES.has(error.code)
+}
+
+/**
+ * Bridge an async stream to a Web ReadableStream so the existing `readSse`
+ * parser can consume both Node responses and CDP streams unchanged.
+ */
+function iteratorToStream(iterator, { onError = (error) => error, onDone } = {}) {
+  const encoder = new TextEncoder()
+  return new ReadableStream({
+    async pull(controller) {
+      try {
+        const { done, value } = await iterator.next()
+        if (done) {
+          controller.close()
+          try {
+            await onDone?.()
+          } catch {
+            // Cookie syncing is best-effort.
+          }
+          return
+        }
+        const text = String(value)
+        controller.enqueue(encoder.encode(text.endsWith('\n') ? text : `${text}\n`))
+      } catch (error) {
+        try {
+          await iterator.return?.()
+        } catch {
+          // The stream is already gone.
+        }
+        controller.error(onError(error))
+      }
+    },
+    async cancel() {
+      try {
+        await iterator.return?.()
+      } catch {
+        // Already closed.
+      }
+    },
+  })
 }
 
 function clampNumber(value, min, max) {
@@ -533,7 +650,13 @@ export class DeepSeekWebClient {
     cookies,
     resolveToken,
     resolveCookies,
+    persistToken,
+    persistCookies,
+    ensureHeadless,
     logger,
+    transport,
+    cdpPort,
+    cdpHost,
   } = {}) {
     this.baseURL = String(baseURL || 'https://chat.deepseek.com').replace(/\/+$/, '')
     this.timeoutMs = Math.max(15000, Number(timeoutMs) || 300000)
@@ -574,6 +697,12 @@ export class DeepSeekWebClient {
     this.cookies = cookies
     this.resolveToken = resolveToken
     this.resolveCookies = resolveCookies
+    // Persist browser-derived auth so a later Node fallback (even after a
+    // Harness restart) still has credentials when Chrome is closed.
+    this.persistToken = persistToken
+    this.persistCookies = persistCookies
+    this.ensureHeadless = ensureHeadless
+    this.lastCdpCookies = undefined
     this.logger = logger
     this.jar = new CookieJar()
     this.lastToken = undefined
@@ -581,14 +710,174 @@ export class DeepSeekWebClient {
     // Undefined probes the cheap path first; true/false remembers what the
     // upstream actually required, so a probe failure costs one request once.
     this.sessionPoW = undefined
+    // 'node' sends the request with fetch; 'cdp' runs it inside the user's own
+    // chat.deepseek.com tab (with a Node fallback); 'headless' runs it inside a
+    // managed, always-on headless Chromium and never falls back to Node.
+    this.transport = transport === 'cdp' || transport === 'headless' ? transport : 'node'
+    this.cdpPort = Number.isInteger(Number(cdpPort)) && Number(cdpPort) > 0 ? Number(cdpPort) : 9222
+    this.cdpHost = typeof cdpHost === 'string' && cdpHost.trim() ? cdpHost.trim() : '127.0.0.1'
+    this.cdpConnection = null
+    this.cdpAttaching = null
+    this.cdpTarget = null
+    this.cdpToken = undefined
+    this.cdpSeeded = false
+    this.cdpFallbackLogged = false
+  }
+
+  usesCdp() {
+    return this.transport === 'cdp' || this.transport === 'headless'
+  }
+
+  /** Switch transport at runtime (the settings page does this). */
+  setTransport(transport) {
+    const next = transport === 'cdp' || transport === 'headless' ? transport : 'node'
+    if (next !== this.transport) {
+      this.transport = next
+      this.dropCdp()
+    }
+    return this.transport
+  }
+
+  dropCdp() {
+    try {
+      this.cdpConnection?.close()
+    } catch {
+      // Already closed.
+    }
+    this.cdpConnection = null
+    this.cdpTarget = null
+    this.cdpSeeded = false
+  }
+
+  /** Attach to a page on this origin, reusing the connection across calls. */
+  async cdpPage() {
+    if (this.cdpConnection) return this.cdpConnection
+    if (!this.cdpAttaching) {
+      this.cdpAttaching = attachPage({ host: this.cdpHost, port: this.cdpPort, origin: this.baseURL })
+        .then(({ connection, target }) => {
+          this.cdpConnection = connection
+          this.cdpTarget = target
+          this.cdpFallbackLogged = false
+          this.logger?.info?.(`my-model: attached to Chrome tab ${target.id ?? '?'} (${target.url ?? '?'})`)
+          return connection
+        })
+        .finally(() => {
+          this.cdpAttaching = null
+        })
+    }
+    return this.cdpAttaching
+  }
+
+  /**
+   * Copy the browser cookies into the Node jar. The in-page fetch already uses
+   * them; keeping a copy means a turn can continue after Chrome is closed.
+   */
+  async syncCdpCookies(page = this.cdpConnection) {
+    if (!page) return
+    const header = await getCookies(page, [`${this.baseURL}/`, `${this.baseURL}/api/v0/chat/`])
+    if (header && header !== this.lastCdpCookies) {
+      this.jar.seed(header)
+      this.lastCdpCookies = header
+      await Promise.resolve()
+        .then(() => this.persistCookies?.(header))
+        .catch(() => {})
+    }
+  }
+
+  /**
+   * Seed the headless profile with the stored cookies and token. The profile is
+   * deliberately separate from the visible Chrome one, so a first request in a
+   * fresh profile has no login state unless we put it there.
+   */
+  async seedHeadless(page, token) {
+    try {
+      await page.send('Network.enable', {}, 3000)
+    } catch {
+      // setCookie below may still work.
+    }
+    for (const [name, value] of this.jar.values) {
+      try {
+        await page.send(
+          'Network.setCookie',
+          {
+            name,
+            value,
+            url: `${this.baseURL}/`,
+            path: '/',
+            secure: true,
+            httpOnly: true,
+            sameSite: 'None',
+          },
+          3000,
+        )
+      } catch {
+        // A cookie the page rejects is not worth failing the turn over.
+      }
+    }
+    if (token) {
+      const raw = JSON.stringify({ value: token, __version: '0' })
+      try {
+        await page.send(
+          'Runtime.evaluate',
+          {
+            expression: `localStorage.setItem("userToken", ${JSON.stringify(raw)}); undefined`,
+            returnByValue: true,
+          },
+          3000,
+        )
+      } catch {
+        // The Authorization header is still sent explicitly.
+      }
+    }
+  }
+
+  async prepareCdpPage(page, token) {
+    if (this.transport !== 'headless' || this.cdpSeeded) return
+    await this.seedHeadless(page, token)
+    this.cdpSeeded = true
+  }
+
+  /** Read the signed-in page's localStorage token when no token was pasted. */
+  async cdpUserToken() {
+    if (this.cdpToken) return this.cdpToken
+    const page = await this.cdpPage()
+    const result = await page.send('Runtime.evaluate', {
+      expression: 'localStorage.getItem("userToken")',
+      returnByValue: true,
+    })
+    const raw = result?.result?.value
+    const token = normalizeToken(raw)
+    if (token) {
+      this.cdpToken = token
+      await Promise.resolve()
+        .then(() => this.persistToken?.(token))
+        .catch(() => {})
+    }
+    return token || undefined
   }
 
   async currentToken() {
     const value = this.token !== undefined ? this.token : await this.resolveToken?.()
-    const normalized = normalizeToken(value)
+    let normalized = normalizeToken(value)
+    // Over CDP the signed-in tab is the freshest source of truth; a pasted
+    // token may already have rotated. Keep the cached browser token so a Node
+    // fallback can still run after Chrome is closed.
+    if (this.transport === 'cdp') {
+      let browserToken = this.cdpToken
+      if (!browserToken) {
+        browserToken = await this.cdpUserToken().catch(() => undefined)
+      }
+      if (browserToken) normalized = browserToken
+    } else if (!normalized && this.cdpToken) {
+      normalized = this.cdpToken
+    }
     if (!normalized) {
       throw new AdapterError(
-        'No DeepSeek web token is configured. Open Settings → My Model and paste your chat.deepseek.com userToken.',
+        this.transport === 'headless'
+          ? 'No DeepSeek web token is configured for the headless Chromium. Paste your userToken in ' +
+            'Settings → My Model, or switch to local Chrome once to sync the signed-in tab.'
+          : 'No DeepSeek web token is configured and no signed-in chat.deepseek.com tab was found. ' +
+            'Open chat.deepseek.com in the local Chrome window, or paste your userToken in Settings → My Model.',
         'MISSING_CREDENTIAL',
       )
     }
@@ -642,9 +931,111 @@ export class DeepSeekWebClient {
     return headers
   }
 
-  async request(path, body, { signal, accept, headers: extraHeaders, method = 'POST' } = {}) {
-    const token = await this.prepareAuth()
-    const headers = { ...this.baseHeaders(token, accept), ...(extraHeaders ?? {}) }
+  /** Headers the page's `fetch` is allowed to set (the browser owns the rest). */
+  cdpRequestHeaders(headers) {
+    const blocked = new Set([
+      'cookie',
+      'host',
+      'origin',
+      'referer',
+      'user-agent',
+      'content-length',
+      'sec-ch-ua',
+      'sec-ch-ua-mobile',
+      'sec-ch-ua-platform',
+      'sec-fetch-site',
+      'sec-fetch-mode',
+      'sec-fetch-dest',
+    ])
+    const out = {}
+    for (const [key, value] of Object.entries(headers ?? {})) {
+      if (!blocked.has(key.toLowerCase())) out[key] = value
+    }
+    return out
+  }
+
+  /** One in-page JSON request (CDP transport). */
+  async cdpJson(path, { method = 'GET', headers = {}, body, signal } = {}) {
+    const page = await this.cdpPage()
+    await this.syncCdpCookies(page)
+    const result = await fetchInPage(page, `${this.baseURL}${path}`, {
+      method,
+      headers: this.cdpRequestHeaders(headers),
+      body,
+      timeoutMs: Math.min(this.timeoutMs, 120000),
+    })
+    await this.syncCdpCookies(page).catch(() => {})
+    if (result.status === 0) {
+      throw new CdpError(`In-page fetch failed: ${result.text || 'no response'}`, 'EVAL_FAILED')
+    }
+    return new CdpResponse(result)
+  }
+
+  /** Open an in-page SSE request and hand its raw lines to the shared parser. */
+  cdpStreamResponse(page, path, { method = 'POST', headers = {}, body, signal } = {}) {
+    const self = this
+    const iterator = streamInPage(page, `${this.baseURL}${path}`, {
+      method,
+      headers: this.cdpRequestHeaders(headers),
+      body,
+      signal,
+      raw: true,
+    })
+    const withCookieSync = (async function* () {
+      try {
+        yield* iterator
+      } finally {
+        await self.syncCdpCookies(page).catch(() => {})
+      }
+    })()
+    const stream = iteratorToStream(withCookieSync, {
+      onError: (error) => self.mapCdpStreamError(error),
+    })
+    return new CdpResponse({
+      status: 200,
+      contentType: 'text/event-stream',
+      headers: { 'content-type': 'text/event-stream' },
+      body: stream,
+    })
+  }
+
+  mapCdpStreamError(error) {
+    if (error?.code === 'HTTP_ERROR') {
+      let detail = {}
+      try {
+        detail = JSON.parse(error.message)
+      } catch {
+        // Keep the raw message below.
+      }
+      const status = Number(detail.status) || 0
+      const text = String(detail.text ?? '')
+      if (status === 0) {
+        // The page's fetch threw before a response existed (Chrome closed,
+        // navigation, network down). Treat it as a transport failure so the
+        // adapter retries and the retry can fall back to Node.
+        return cdpErrorToAdapter(
+          new CdpError(`In-page stream failed: ${text || 'no response'}`, 'EVAL_FAILED'),
+        )
+      }
+      const headers = {
+        'content-type': String(detail.contentType ?? ''),
+        ...(detail.headers && typeof detail.headers === 'object' ? detail.headers : {}),
+      }
+      const response = responseLike(status, headers)
+      if (isChallengeBody(text, response)) {
+        return new AdapterError(
+          'DeepSeek Web returned a human-verification challenge. Open chat.deepseek.com in your browser, complete the challenge, then retry (Chrome mode reuses that tab).',
+          'WAF_CHALLENGE',
+          status,
+        )
+      }
+      return this.httpError(response, text)
+    }
+    if (error instanceof CdpError) this.dropCdp()
+    return cdpErrorToAdapter(error)
+  }
+
+  async nodeRequest(path, body, { signal, headers, method = 'POST' } = {}) {
     const timeout = AbortSignal.timeout(this.timeoutMs)
     const combined = signal ? AbortSignal.any([signal, timeout]) : timeout
     let response
@@ -665,6 +1056,70 @@ export class DeepSeekWebClient {
     }
     this.jar.absorb(response)
     return response
+  }
+
+  async request(path, body, { signal, accept, headers: extraHeaders, method = 'POST' } = {}) {
+    const token = await this.prepareAuth()
+    const makeHeaders = () => ({ ...this.baseHeaders(token, accept), ...(extraHeaders ?? {}) })
+    if (this.usesCdp()) {
+      if (this.transport === 'headless') {
+        let lastError
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            const page = await this.cdpPage()
+            await this.prepareCdpPage(page, token)
+            if (String(accept ?? '').includes('text/event-stream')) {
+              await this.syncCdpCookies(page).catch(() => {})
+              return this.cdpStreamResponse(page, path, { method, headers: makeHeaders(), body, signal })
+            }
+            return await this.cdpJson(path, { method, headers: makeHeaders(), body, signal })
+          } catch (error) {
+            lastError = error
+            if (!canFallbackFromCdp(error)) throw cdpErrorToAdapter(error)
+            this.dropCdp()
+            if (attempt === 0 && this.ensureHeadless) {
+              this.logger?.warn?.(
+                `my-model: headless Chromium unavailable (${error.code}); starting it and retrying`,
+              )
+              try {
+                await this.ensureHeadless()
+              } catch (startError) {
+                throw new AdapterError(
+                  `Headless Chromium could not start: ${startError?.message ?? String(startError)}`,
+                  'HEADLESS_UNAVAILABLE',
+                )
+              }
+              continue
+            }
+            break
+          }
+        }
+        // Headless mode is deliberately Node-free: after a restart attempt the
+        // turn fails with a transport error instead of silently changing stacks.
+        throw cdpErrorToAdapter(lastError)
+      }
+      try {
+        const page = await this.cdpPage()
+        if (String(accept ?? '').includes('text/event-stream')) {
+          await this.syncCdpCookies(page).catch(() => {})
+          return this.cdpStreamResponse(page, path, { method, headers: makeHeaders(), body, signal })
+        }
+        return await this.cdpJson(path, { method, headers: makeHeaders(), body, signal })
+      } catch (error) {
+        if (!canFallbackFromCdp(error)) throw cdpErrorToAdapter(error)
+        // Chrome was closed, never started, or has no chat.deepseek.com tab.
+        // This is the normal "Chrome is not running" path, not a failed turn:
+        // continue on the Node transport with the same token/cookies.
+        if (!this.cdpFallbackLogged) {
+          this.cdpFallbackLogged = true
+          this.logger?.warn?.(`my-model: Chrome CDP unavailable (${error.code}); falling back to Node transport`)
+        }
+        this.dropCdp()
+      }
+    }
+    // Rebuild after the CDP attempt so cookies synced from the browser are
+    // present in the Node fallback request.
+    return this.nodeRequest(path, body, { signal, headers: makeHeaders(), method })
   }
 
   async readJson(response) {
@@ -726,6 +1181,9 @@ export class DeepSeekWebClient {
       return new AdapterError(`DeepSeek Web account is muted: ${message}`, 'ACCOUNT_MUTED', status)
     }
     if (code === 40003 || code === 40001 || status === 401 || status === 403) {
+      // The cached tab token may have rotated after a re-login; read it again
+      // on the next attempt instead of reusing the rejected value.
+      this.cdpToken = undefined
       return new AdapterError(
         `DeepSeek Web rejected the token (${message}). Log in to chat.deepseek.com again and paste a fresh userToken. If the web account was muted, the rejection persists until the mute lifts — re-login alone will not fix that.`,
         'INVALID_CREDENTIAL',
@@ -778,6 +1236,7 @@ export class DeepSeekWebClient {
       )
     }
     if (status === 401 || status === 403) {
+      this.cdpToken = undefined
       return new AdapterError(
         `DeepSeek Web rejected the token (HTTP ${status}). Log in again and paste a fresh userToken. If the web account was muted, the rejection persists until the mute lifts — re-login alone will not fix that. ${detail}`,
         'INVALID_CREDENTIAL',
@@ -1291,6 +1750,12 @@ export class DeepSeekWebAdapter {
     clientLocale,
     clientPlatform,
     clientBundleId,
+    transport,
+    cdpPort,
+    cdpHost,
+    persistToken,
+    persistCookies,
+    ensureHeadless,
     maxPromptChars,
     maxToolChars,
     logger,
@@ -1325,7 +1790,13 @@ export class DeepSeekWebAdapter {
       clientBundleId,
       resolveToken,
       resolveCookies,
+      persistToken,
+      persistCookies,
+      ensureHeadless,
       logger,
+      transport,
+      cdpPort,
+      cdpHost,
     })
     this.maxPromptChars = Math.max(20000, Number(maxPromptChars) || 1_000_000)
     this.maxToolChars = Math.max(500, Number(maxToolChars) || 8000)

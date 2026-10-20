@@ -31,13 +31,15 @@ import {
 import {
   ChatGptWebAdapter,
   ChatGptWebClient,
+  DEFAULT_UA as CHATGPT_DEFAULT_UA,
   MODELS as CHATGPT_MODELS,
   PROVIDER as CHATGPT_PROVIDER,
   PROVIDER_NAME as CHATGPT_PROVIDER_NAME,
   normalizeAccessToken,
 } from './chatgpt-web.js'
-import { probeCdp } from './chrome-cdp.js'
+import { attachPage, getCookies, probeCdp } from './chrome-cdp.js'
 import { LaunchError, launchChrome } from './chrome-launch.js'
+import { HeadlessChromeError, ManagedChrome, defaultHeadlessUserDataDir } from './headless-chrome.js'
 
 export const name = 'my-model'
 export const inject = ['llm']
@@ -55,15 +57,31 @@ const DEFAULTS = {
   chatgptModelSlug: 'gpt-6-luna',
   chatgptLanguage: 'zh-CN',
   // 'node' sends the request with fetch; 'cdp' runs it inside the user's own
-  // Chrome page so the TLS/HTTP2 fingerprint is the browser's.
+  // Chrome page so the TLS/HTTP2 fingerprint is the browser's; 'headless' runs
+  // the same page in a managed, always-on headless Chromium.
   chatgptTransport: 'node',
   chatgptCdpPort: 9222,
   chatgptCdpHost: '127.0.0.1',
+  // A second managed Chromium for ChatGPT keeps its profile and login separate
+  // from the DeepSeek one (and from the visible debug browser).
+  chatgptHeadlessPort: 9224,
+  chatgptHeadlessHost: '127.0.0.1',
+  chatgptHeadlessUserDataDir: '',
+  // DeepSeek web transport. 'cdp' runs the request in a chat.deepseek.com tab
+  // and automatically falls back to Node when that Chrome window is closed.
+  // 'headless' runs it in a managed, always-on headless Chromium and never
+  // falls back to Node.
+  deepseekTransport: 'node',
+  deepseekCdpPort: 9222,
+  deepseekCdpHost: '127.0.0.1',
+  deepseekHeadlessPort: 9223,
+  deepseekHeadlessHost: '127.0.0.1',
   // One-click launcher: which executable to start and where its dedicated
   // profile lives. Empty means "find the browser automatically" and
   // "<LOCALAPPDATA>/dsh-chrome".
   chromePath: '',
   chromeUserDataDir: '',
+  chromeHeadlessUserDataDir: '',
   timeoutMs: 300000,
   maxPromptChars: 1_000_000,
   // Tool results are truncated and secret-redacted before they reach the web
@@ -124,6 +142,7 @@ const PROFILE_OVERRIDES_FILE = '.my-model.json'
  * loader config field by field).
  */
 const CHATGPT_SETTINGS_FILE = '.my-model-chatgpt.json'
+const DEEPSEEK_SETTINGS_FILE = '.my-model-deepseek.json'
 const FINGERPRINT_KEYS = [
   'userAgent',
   'secChUa',
@@ -218,9 +237,15 @@ function readChatgptSettings(dir) {
     const parsed = JSON.parse(readFileSync(join(dir, CHATGPT_SETTINGS_FILE), 'utf8'))
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
     const out = {}
-    if (parsed.transport === 'cdp' || parsed.transport === 'node') out.chatgptTransport = parsed.transport
+    if (parsed.transport === 'cdp' || parsed.transport === 'node' || parsed.transport === 'headless') {
+      out.chatgptTransport = parsed.transport
+    }
     const port = Number(parsed.cdpPort)
     if (Number.isInteger(port) && port > 0 && port < 65536) out.chatgptCdpPort = port
+    const headlessPort = Number(parsed.headlessPort)
+    if (Number.isInteger(headlessPort) && headlessPort > 0 && headlessPort < 65536) {
+      out.chatgptHeadlessPort = headlessPort
+    }
     return out
   } catch {
     return {}
@@ -232,6 +257,38 @@ function writeChatgptSettings(dir, value) {
   try {
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, CHATGPT_SETTINGS_FILE), `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+  } catch {
+    // Persisting the transport is a convenience; never fail the request for it.
+  }
+}
+
+/** Read the persisted DeepSeek transport choice (missing file = defaults). */
+function readDeepseekSettings(dir) {
+  if (!dir) return {}
+  try {
+    const parsed = JSON.parse(readFileSync(join(dir, DEEPSEEK_SETTINGS_FILE), 'utf8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    const out = {}
+    if (parsed.transport === 'cdp' || parsed.transport === 'node' || parsed.transport === 'headless') {
+      out.deepseekTransport = parsed.transport
+    }
+    const port = Number(parsed.cdpPort)
+    if (Number.isInteger(port) && port > 0 && port < 65536) out.deepseekCdpPort = port
+    const headlessPort = Number(parsed.headlessPort)
+    if (Number.isInteger(headlessPort) && headlessPort > 0 && headlessPort < 65536) {
+      out.deepseekHeadlessPort = headlessPort
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+function writeDeepseekSettings(dir, value) {
+  if (!dir) return
+  try {
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, DEEPSEEK_SETTINGS_FILE), `${JSON.stringify(value, null, 2)}\n`, 'utf8')
   } catch {
     // Persisting the transport is a convenience; never fail the request for it.
   }
@@ -358,16 +415,50 @@ function optionsOf(config) {
       typeof input.chatgptLanguage === 'string' && input.chatgptLanguage.trim()
         ? input.chatgptLanguage.trim()
         : DEFAULTS.chatgptLanguage,
-    chatgptTransport: input.chatgptTransport === 'cdp' ? 'cdp' : 'node',
+    chatgptTransport:
+      input.chatgptTransport === 'cdp' || input.chatgptTransport === 'headless'
+        ? input.chatgptTransport
+        : 'node',
     chatgptCdpPort: Math.round(clampNumber(input.chatgptCdpPort, DEFAULTS.chatgptCdpPort, 1, 65535)),
     chatgptCdpHost:
       typeof input.chatgptCdpHost === 'string' && input.chatgptCdpHost.trim()
         ? input.chatgptCdpHost.trim()
         : DEFAULTS.chatgptCdpHost,
+    chatgptHeadlessPort: Math.round(
+      clampNumber(input.chatgptHeadlessPort, DEFAULTS.chatgptHeadlessPort, 1, 65535),
+    ),
+    chatgptHeadlessHost:
+      typeof input.chatgptHeadlessHost === 'string' && input.chatgptHeadlessHost.trim()
+        ? input.chatgptHeadlessHost.trim()
+        : DEFAULTS.chatgptHeadlessHost,
+    chatgptHeadlessUserDataDir:
+      typeof input.chatgptHeadlessUserDataDir === 'string' && input.chatgptHeadlessUserDataDir.trim()
+        ? input.chatgptHeadlessUserDataDir.trim()
+        : '',
+    deepseekTransport:
+      input.deepseekTransport === 'cdp' || input.deepseekTransport === 'headless'
+        ? input.deepseekTransport
+        : 'node',
+    deepseekCdpPort: Math.round(clampNumber(input.deepseekCdpPort, DEFAULTS.deepseekCdpPort, 1, 65535)),
+    deepseekCdpHost:
+      typeof input.deepseekCdpHost === 'string' && input.deepseekCdpHost.trim()
+        ? input.deepseekCdpHost.trim()
+        : DEFAULTS.deepseekCdpHost,
+    deepseekHeadlessPort: Math.round(
+      clampNumber(input.deepseekHeadlessPort, DEFAULTS.deepseekHeadlessPort, 1, 65535),
+    ),
+    deepseekHeadlessHost:
+      typeof input.deepseekHeadlessHost === 'string' && input.deepseekHeadlessHost.trim()
+        ? input.deepseekHeadlessHost.trim()
+        : DEFAULTS.deepseekHeadlessHost,
     chromePath: typeof input.chromePath === 'string' && input.chromePath.trim() ? input.chromePath.trim() : '',
     chromeUserDataDir:
       typeof input.chromeUserDataDir === 'string' && input.chromeUserDataDir.trim()
         ? input.chromeUserDataDir.trim()
+        : '',
+    chromeHeadlessUserDataDir:
+      typeof input.chromeHeadlessUserDataDir === 'string' && input.chromeHeadlessUserDataDir.trim()
+        ? input.chromeHeadlessUserDataDir.trim()
         : '',
     timeoutMs: Math.max(15000, Number(input.timeoutMs) || DEFAULTS.timeoutMs),
     maxPromptChars: Math.max(20000, Number(input.maxPromptChars) || DEFAULTS.maxPromptChars),
@@ -536,6 +627,14 @@ function createApi(ctx, options, adapter, state, extras = {}) {
   const credentials = () => safeGet(ctx, 'credentials')
   const log = extras.logger ?? ctx.logger
   const chatgpt = extras.chatgpt ?? {}
+  const headless = extras.headless
+  const chatgptHeadless = extras.chatgptHeadless
+  // The visible Chrome endpoint survives transport switches; the headless
+  // manager owns its own port/host.
+  let deepseekVisiblePort = options.deepseekCdpPort
+  let deepseekVisibleHost = options.deepseekCdpHost
+  let chatgptVisiblePort = options.chatgptCdpPort
+  let chatgptVisibleHost = options.chatgptCdpHost
 
   /**
    * Status of one web account. Shared by the DeepSeek and ChatGPT cards so the
@@ -585,9 +684,9 @@ function createApi(ctx, options, adapter, state, extras = {}) {
    * Whether a Chromium DevTools endpoint is listening, plus which browser it is.
    * Cheap on loopback (a refused connection returns immediately).
    */
-  const cdpStatus = async () => {
-    const port = chatgpt.adapter?.client?.cdpPort ?? options.chatgptCdpPort
-    const host = chatgpt.adapter?.client?.cdpHost ?? options.chatgptCdpHost
+  const cdpStatusFor = async (client, fallbackPort, fallbackHost) => {
+    const port = client?.cdpPort ?? fallbackPort
+    const host = client?.cdpHost ?? fallbackHost
     const probe = await probeCdp({ host, port, timeoutMs: 800 })
     return { host, port, ...probe }
   }
@@ -625,6 +724,9 @@ function createApi(ctx, options, adapter, state, extras = {}) {
     return {
       ok: true,
       ...primary,
+      transport: adapter.client.transport,
+      cdp: await cdpStatusFor(adapter.client, options.deepseekCdpPort, options.deepseekCdpHost),
+      headless: headless ? await headless.status() : null,
       defaultSelection,
       fingerprint: {
         userAgent: adapter.client.userAgent,
@@ -647,7 +749,8 @@ function createApi(ctx, options, adapter, state, extras = {}) {
               ...chatgptAccount,
               modelSlug: options.chatgptModelSlug,
               transport: chatgpt.adapter?.client?.transport ?? options.chatgptTransport,
-              cdp: await cdpStatus(),
+              cdp: await cdpStatusFor(undefined, chatgptVisiblePort, chatgptVisibleHost),
+              headless: chatgptHeadless ? await chatgptHeadless.status() : null,
             },
           }
         : {}),
@@ -715,16 +818,19 @@ function createApi(ctx, options, adapter, state, extras = {}) {
 
   const test = async (req) => {
     const body = await readJson(req)
+    const usingCdp = adapter.client.transport === 'cdp'
+    const usingHeadless = adapter.client.transport === 'headless'
     const token = body.token
       ? normalizeToken(body.token)
       : await resolveSecret(ctx, options.tokenEnv)
-    if (!token) {
+    const testToken = token || adapter.client.cdpToken
+    if (!testToken && !usingCdp) {
       throw new ApiError(400, 'Paste a DeepSeek web token first.', 'MISSING_CREDENTIAL')
     }
     const cookies =
       typeof body.cookies === 'string' && body.cookies.trim()
         ? body.cookies.trim()
-        : ((await resolveSecret(ctx, options.cookiesEnv)) ?? '')
+        : ((await resolveSecret(ctx, options.cookiesEnv)) ?? '') || adapter.client.jar.header()
     const client = new DeepSeekWebClient({
       baseURL: options.baseURL,
       timeoutMs: Math.min(options.timeoutMs, 60000),
@@ -744,7 +850,13 @@ function createApi(ctx, options, adapter, state, extras = {}) {
       clientLocale: adapter.client.clientLocale,
       clientPlatform: adapter.client.clientPlatform,
       clientBundleId: adapter.client.clientBundleId,
-      token,
+      // Exercise the same transport the turns will use; CDP falls back to Node
+      // when Chrome is closed, while headless starts its managed browser.
+      transport: usingHeadless ? 'headless' : usingCdp ? 'cdp' : 'node',
+      cdpPort: adapter.client.cdpPort,
+      cdpHost: adapter.client.cdpHost,
+      ensureHeadless: () => headless?.ensure(),
+      token: testToken,
       cookies,
       logger: log,
     })
@@ -776,7 +888,8 @@ function createApi(ctx, options, adapter, state, extras = {}) {
   const testChatgpt = async (req) => {
     if (!chatgpt.adapter) throw new ApiError(409, 'The ChatGPT provider is not active in this profile.', 'NO_PROVIDER')
     const live = chatgpt.adapter.client
-    const usingCdp = live.transport === 'cdp'
+    const usingCdp = live.usesCdp()
+    const usingHeadless = live.transport === 'headless'
     const body = await readJson(req)
     const token =
       typeof body.token === 'string' && body.token.trim()
@@ -810,6 +923,7 @@ function createApi(ctx, options, adapter, state, extras = {}) {
       transport: live.transport,
       cdpPort: live.cdpPort,
       cdpHost: live.cdpHost,
+      ensureHeadless: () => chatgptHeadless?.ensure(),
     })
     try {
       const result = await client.testAuth()
@@ -821,11 +935,14 @@ function createApi(ctx, options, adapter, state, extras = {}) {
         at: new Date().toISOString(),
         latencyMs: result.latencyMs,
         message: result.turnstileRequired
-          ? usingCdp
-            ? `${who}; this account requires a Turnstile proof, so chat turns are sent through the open page's composer. ` +
-              'Keep that Chrome window open while the Harness works.'
-            : `${who}; this account requires a Turnstile proof, which only the page's own JavaScript can produce. ` +
-              'Switch to the local Chrome transport (or launch it from this page) and retry.'
+          ? usingHeadless
+            ? `${who}; this account requires a Turnstile proof, so chat turns are sent through the managed ` +
+              'headless Chromium page composer.'
+            : usingCdp
+              ? `${who}; this account requires a Turnstile proof, so chat turns are sent through the open page's composer. ` +
+                'Keep that Chrome window open while the Harness works.'
+              : `${who}; this account requires a Turnstile proof, which only the page's own JavaScript can produce. ` +
+                'Switch to the local Chrome or managed headless transport and retry.'
           : `${who}; the sentinel token was obtained.`,
         turnstileRequired: Boolean(result.turnstileRequired),
       }
@@ -848,27 +965,47 @@ function createApi(ctx, options, adapter, state, extras = {}) {
 
   /**
    * Switch how ChatGPT requests leave the machine:
-   *  - `node`  — fetch from the host (fails Cloudflare's device check in practice)
-   *  - `cdp`   — run the fetch inside the user's own Chrome tab
+   *  - `node`     — fetch from the host (fails Cloudflare's device check in practice)
+   *  - `cdp`      — run the fetch inside the user's own Chrome tab
+   *  - `headless` — run the same page in the managed, always-on headless Chromium
    * The choice is applied immediately and persisted per profile.
    */
   const setChatgptTransport = async (req) => {
     if (!chatgpt.adapter) throw new ApiError(409, 'The ChatGPT provider is not active in this profile.', 'NO_PROVIDER')
     const body = await readJson(req)
     const transport = body.transport
-    if (transport !== 'node' && transport !== 'cdp') {
-      throw new ApiError(400, 'transport must be "node" or "cdp".', 'BAD_TRANSPORT')
+    if (transport !== 'node' && transport !== 'cdp' && transport !== 'headless') {
+      throw new ApiError(400, 'transport must be "node", "cdp" or "headless".', 'BAD_TRANSPORT')
+    }
+    if (transport === 'headless' && !chatgptHeadless) {
+      throw new ApiError(409, 'The headless Chromium manager is unavailable.', 'NO_HEADLESS')
     }
     const client = chatgpt.adapter.client
-    client.setTransport(transport)
     if (body.port !== undefined) {
       const port = Number(body.port)
       if (!Number.isInteger(port) || port < 1 || port > 65535) {
         throw new ApiError(400, 'port must be an integer between 1 and 65535.', 'BAD_PORT')
       }
-      client.cdpPort = port
+      if (transport === 'headless') chatgptHeadless.port = port
+      else {
+        chatgptVisiblePort = port
+        client.cdpPort = port
+      }
     }
-    writeChatgptSettings(extras.profileDir, { transport, cdpPort: client.cdpPort })
+    if (transport === 'headless') {
+      chatgptHeadless.port = chatgptHeadless.port ?? options.chatgptHeadlessPort
+      client.cdpPort = chatgptHeadless.port
+      client.cdpHost = chatgptHeadless.host
+    } else {
+      client.cdpPort = chatgptVisiblePort
+      client.cdpHost = chatgptVisibleHost
+    }
+    client.setTransport(transport)
+    writeChatgptSettings(extras.profileDir, {
+      transport,
+      cdpPort: chatgptVisiblePort,
+      headlessPort: chatgptHeadless?.port ?? options.chatgptHeadlessPort,
+    })
     chatgpt.state.lastTest = null
     return status()
   }
@@ -883,7 +1020,7 @@ function createApi(ctx, options, adapter, state, extras = {}) {
     if (!chatgpt.adapter) throw new ApiError(409, 'The ChatGPT provider is not active in this profile.', 'NO_PROVIDER')
     const body = await readJson(req)
     const client = chatgpt.adapter.client
-    const port = body.port === undefined ? Number(client.cdpPort) : Number(body.port)
+    const port = body.port === undefined ? Number(chatgptVisiblePort) : Number(body.port)
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       throw new ApiError(400, 'port must be an integer between 1 and 65535.', 'BAD_PORT')
     }
@@ -891,7 +1028,7 @@ function createApi(ctx, options, adapter, state, extras = {}) {
     try {
       launch = await launchChrome({
         port,
-        host: client.cdpHost,
+        host: chatgptVisibleHost,
         configuredExecutable: options.chromePath || undefined,
         profileDir: options.chromeUserDataDir || undefined,
       })
@@ -906,10 +1043,211 @@ function createApi(ctx, options, adapter, state, extras = {}) {
     // the user asked for one click — so save that choice too.
     client.setTransport('cdp')
     client.cdpPort = port
-    writeChatgptSettings(extras.profileDir, { transport: 'cdp', cdpPort: port })
+    client.cdpHost = chatgptVisibleHost
+    chatgptVisiblePort = port
+    writeChatgptSettings(extras.profileDir, {
+      transport: 'cdp',
+      cdpPort: port,
+      headlessPort: chatgptHeadless?.port ?? options.chatgptHeadlessPort,
+    })
     chatgpt.state.lastTest = null
     log?.info?.(`my-model: ${launch.message}`)
     return { ok: true, launch, status: await status() }
+  }
+
+  /**
+   * Copy the chatgpt.com cookies from the visible debug Chrome into the
+   * credential store. The headless profile is separate, and Cloudflare's
+   * cf_clearance only works with a matching User-Agent, which the client sets
+   * from the same fingerprint — so a copied blob is enough to sign in.
+   */
+  const importVisibleChatgptCookies = async () => {
+    const store = credentials()
+    if (!store?.set) return false
+    let attached
+    try {
+      attached = await attachPage({
+        host: chatgptVisibleHost,
+        port: chatgptVisiblePort,
+        origin: options.chatgptBaseURL,
+        timeoutMs: 4000,
+      })
+    } catch {
+      return false
+    }
+    try {
+      const header = await getCookies(attached.connection, [`${options.chatgptBaseURL}/`])
+      if (!header) return false
+      await store.set(options.chatgptCookiesEnv, header)
+      return true
+    } finally {
+      try {
+        attached.connection.close()
+      } catch {
+        // Already closed.
+      }
+    }
+  }
+
+  /**
+   * Start (or adopt) the always-on headless Chromium for ChatGPT and switch to
+   * it. Its profile is separate from the visible browser, so the login is
+   * seeded from the visible tab when one is available, or from the saved cookie
+   * string otherwise.
+   */
+  const startChatgptHeadless = async () => {
+    if (!chatgptHeadless) throw new ApiError(409, 'The headless Chromium manager is unavailable.', 'NO_HEADLESS')
+    let result
+    try {
+      result = await chatgptHeadless.ensure()
+    } catch (error) {
+      if (error instanceof HeadlessChromeError) {
+        log?.warn?.(`my-model: headless Chromium failed (${error.code}): ${error.message}`)
+        throw new ApiError(400, error.message, error.code)
+      }
+      throw error
+    }
+    let importedCookies = false
+    try {
+      importedCookies = await importVisibleChatgptCookies()
+    } catch (error) {
+      log?.warn?.(`my-model: could not copy chatgpt.com cookies from local Chrome: ${error?.message ?? String(error)}`)
+    }
+    const client = chatgpt.adapter.client
+    client.cdpPort = chatgptHeadless.port
+    client.cdpHost = chatgptHeadless.host
+    client.setTransport('headless')
+    writeChatgptSettings(extras.profileDir, {
+      transport: 'headless',
+      cdpPort: chatgptVisiblePort,
+      headlessPort: chatgptHeadless.port,
+    })
+    chatgpt.state.lastTest = null
+    log?.info?.(`my-model: ${result.message ?? 'headless Chromium ready'}${importedCookies ? ' (chatgpt.com cookies imported)' : ''}`)
+    return { ok: true, headless: { ...result, importedCookies }, status: await status() }
+  }
+
+  /**
+   * Switch how DeepSeek Web requests leave the machine:
+   *  - `node`     — fetch from the host
+   *  - `cdp`      — run the fetch inside a visible Chrome tab, with a Node fallback
+   *  - `headless` — run the fetch inside the managed, always-on headless Chromium
+   *                 (no Node fallback)
+   * The choice is applied immediately and persisted per profile.
+   */
+  const setDeepseekTransport = async (req) => {
+    const body = await readJson(req)
+    const transport = body.transport
+    if (transport !== 'node' && transport !== 'cdp' && transport !== 'headless') {
+      throw new ApiError(400, 'transport must be "node", "cdp" or "headless".', 'BAD_TRANSPORT')
+    }
+    const client = adapter.client
+    client.setTransport(transport)
+    if (transport === 'headless') {
+      client.cdpPort = headless?.port ?? options.deepseekHeadlessPort
+      client.cdpHost = headless?.host ?? options.deepseekHeadlessHost
+    } else if (transport === 'cdp') {
+      client.cdpPort = deepseekVisiblePort
+      client.cdpHost = deepseekVisibleHost
+    }
+    if (body.port !== undefined) {
+      const port = Number(body.port)
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new ApiError(400, 'port must be an integer between 1 and 65535.', 'BAD_PORT')
+      }
+      if (transport === 'cdp') {
+        deepseekVisiblePort = port
+        client.cdpPort = port
+      }
+    }
+    writeDeepseekSettings(extras.profileDir, {
+      transport,
+      cdpPort: deepseekVisiblePort,
+      headlessPort: headless?.port ?? options.deepseekHeadlessPort,
+    })
+    state.lastTest = null
+    return status()
+  }
+
+  /**
+   * Start the local debug browser for DeepSeek and switch the transport. The
+   * executable/profile come from plugin config; the request may only choose a
+   * validated port.
+   */
+  const launchDeepseekChrome = async (req) => {
+    const body = await readJson(req)
+    const client = adapter.client
+    const port = body.port === undefined ? Number(deepseekVisiblePort) : Number(body.port)
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new ApiError(400, 'port must be an integer between 1 and 65535.', 'BAD_PORT')
+    }
+    let launch
+    try {
+      launch = await launchChrome({
+        port,
+        host: deepseekVisibleHost,
+        configuredExecutable: options.chromePath || undefined,
+        profileDir: options.chromeUserDataDir || undefined,
+        url: `${options.baseURL}/`,
+      })
+    } catch (error) {
+      if (error instanceof LaunchError) {
+        log?.warn?.(`my-model: could not start local Chrome for DeepSeek (${error.code}): ${error.message}`)
+        throw new ApiError(400, error.message, error.code)
+      }
+      throw error
+    }
+    // If the debug browser was already running (for example for ChatGPT), the
+    // launcher does not open another window. Open/find the DeepSeek tab here so
+    // the user has somewhere to sign in.
+    try {
+      const attached = await attachPage({ host: deepseekVisibleHost, port, origin: options.baseURL })
+      attached.connection.close()
+    } catch (error) {
+      log?.warn?.(`my-model: Chrome started but no chat.deepseek.com tab could be opened: ${error.message}`)
+    }
+    deepseekVisiblePort = port
+    client.setTransport('cdp')
+    client.cdpPort = port
+    client.cdpHost = deepseekVisibleHost
+    writeDeepseekSettings(extras.profileDir, {
+      transport: 'cdp',
+      cdpPort: port,
+      headlessPort: headless?.port ?? options.deepseekHeadlessPort,
+    })
+    state.lastTest = null
+    log?.info?.(`my-model: ${launch.message}`)
+    return { ok: true, launch, status: await status() }
+  }
+
+  /**
+   * Start (or adopt) the always-on headless Chromium and switch DeepSeek to it.
+   * Unlike the visible transport this one never falls back to Node.
+   */
+  const startDeepseekHeadless = async () => {
+    if (!headless) throw new ApiError(409, 'The headless Chromium manager is unavailable.', 'NO_HEADLESS')
+    let result
+    try {
+      result = await headless.ensure()
+    } catch (error) {
+      if (error instanceof HeadlessChromeError) {
+        log?.warn?.(`my-model: headless Chromium failed (${error.code}): ${error.message}`)
+        throw new ApiError(400, error.message, error.code)
+      }
+      throw error
+    }
+    const client = adapter.client
+    client.setTransport('headless')
+    client.cdpPort = headless.port
+    client.cdpHost = headless.host
+    writeDeepseekSettings(extras.profileDir, {
+      transport: 'headless',
+      cdpPort: deepseekVisiblePort,
+      headlessPort: headless.port,
+    })
+    state.lastTest = null
+    log?.info?.(`my-model: ${result.message ?? 'headless Chromium ready'}`)
+    return { ok: true, headless: result, status: await status() }
   }
 
   const setDefault = async (req) => {
@@ -1010,6 +1348,18 @@ function createApi(ctx, options, adapter, state, extras = {}) {
         json(res, 200, await saveFingerprint(req))
         return
       }
+      if (path === '/my-model/api/deepseek/transport' && req.method === 'POST') {
+        json(res, 200, await setDeepseekTransport(req))
+        return
+      }
+      if (path === '/my-model/api/deepseek/launch' && req.method === 'POST') {
+        json(res, 200, await launchDeepseekChrome(req))
+        return
+      }
+      if (path === '/my-model/api/deepseek/headless' && req.method === 'POST') {
+        json(res, 200, await startDeepseekHeadless(req))
+        return
+      }
       if (path === '/my-model/api/chatgpt/status' && req.method === 'GET') {
         json(res, 200, await status())
         return
@@ -1024,6 +1374,10 @@ function createApi(ctx, options, adapter, state, extras = {}) {
       }
       if (path === '/my-model/api/chatgpt/transport' && req.method === 'POST') {
         json(res, 200, await setChatgptTransport(req))
+        return
+      }
+      if (path === '/my-model/api/chatgpt/headless' && req.method === 'POST') {
+        json(res, 200, await startChatgptHeadless())
         return
       }
       if (path === '/my-model/api/chatgpt/launch' && req.method === 'POST') {
@@ -1056,7 +1410,24 @@ export function apply(ctx, config) {
   const startupOverrides = readProfileOverrides(profileDir)
   // Settings-page overrides win over the loader config for the fields they
   // contain, mirroring the host's `base` + user-layer composition.
-  const options = optionsOf({ ...loaderConfig, ...startupOverrides, ...readChatgptSettings(profileDir) })
+  const options = optionsOf({
+    ...loaderConfig,
+    ...startupOverrides,
+    ...readChatgptSettings(profileDir),
+    ...readDeepseekSettings(profileDir),
+  })
+  // A Chrome tab is a legitimate credential source: persist the token/cookies
+  // it yields so a later Node fallback (even after a Harness restart) still
+  // works when the browser is closed.
+  const persistSecret = async (ref, value) => {
+    const store = safeGet(ctx, 'credentials')
+    if (!store?.set || typeof value !== 'string' || value.length === 0) return
+    try {
+      await store.set(ref, value)
+    } catch {
+      // A read-only credential store must not break a turn.
+    }
+  }
   // The built-in fingerprint is a snapshot and goes stale as the browser and
   // web client update. When no settings-page overrides exist, surface that the
   // defaults are in use instead of failing silently.
@@ -1066,6 +1437,40 @@ export function apply(ctx, config) {
         'set userAgent, secChUa, secChUaPlatform and clientVersion in the settings page or plugin config.',
     )
   }
+  // A separate, always-on Chromium for the Node-free DeepSeek transport. It has
+  // its own profile and port so it can coexist with the visible debug browser.
+  const headless = new ManagedChrome({
+    host: options.deepseekHeadlessHost,
+    port: options.deepseekHeadlessPort,
+    executable: options.chromePath || undefined,
+    profileDir: options.chromeHeadlessUserDataDir || undefined,
+    url: `${options.baseURL}/`,
+    logger,
+  })
+  const deepseekBrowserPort =
+    options.deepseekTransport === 'headless' ? options.deepseekHeadlessPort : options.deepseekCdpPort
+  const deepseekBrowserHost =
+    options.deepseekTransport === 'headless' ? options.deepseekHeadlessHost : options.deepseekCdpHost
+  const chatgptBrowserPort =
+    options.chatgptTransport === 'headless' ? options.chatgptHeadlessPort : options.chatgptCdpPort
+  const chatgptBrowserHost =
+    options.chatgptTransport === 'headless' ? options.chatgptHeadlessHost : options.chatgptCdpHost
+  // ChatGPT gets its own always-on Chromium: the headless profile holds a
+  // chatgpt.com login, which must not be mixed with the DeepSeek profile.
+  const chatgptHeadless = new ManagedChrome({
+    host: options.chatgptHeadlessHost,
+    port: options.chatgptHeadlessPort,
+    executable: options.chromePath || undefined,
+    profileDir:
+      options.chatgptHeadlessUserDataDir ||
+      `${options.chromeHeadlessUserDataDir || defaultHeadlessUserDataDir()}-chatgpt`,
+    // Starting with the Chrome UA means the first navigation does not present
+    // "HeadlessChrome" to Cloudflare; the per-page override is a second line of
+    // defence for an already-running instance.
+    userAgent: options.userAgent || CHATGPT_DEFAULT_UA,
+    url: `${options.chatgptBaseURL}/`,
+    logger,
+  })
   const adapter = new DeepSeekWebAdapter({
     baseURL: options.baseURL,
     timeoutMs: options.timeoutMs,
@@ -1083,11 +1488,17 @@ export function apply(ctx, config) {
     clientLocale: options.clientLocale,
     clientPlatform: options.clientPlatform,
     clientBundleId: options.clientBundleId,
+    transport: options.deepseekTransport,
+    cdpPort: deepseekBrowserPort,
+    cdpHost: deepseekBrowserHost,
+    ensureHeadless: () => headless.ensure(),
     maxPromptChars: options.maxPromptChars,
     maxToolChars: options.maxToolChars,
     logger,
     resolveToken: () => resolveSecret(ctx, options.tokenEnv),
     resolveCookies: () => resolveSecret(ctx, options.cookiesEnv),
+    persistToken: (token) => persistSecret(options.tokenEnv, token),
+    persistCookies: (cookies) => persistSecret(options.cookiesEnv, cookies),
     minTurnGapMs: options.minTurnGapMs,
     maxConcurrentTurns: options.maxConcurrentTurns,
     maxAutoWaitMs: options.maxAutoWaitMs,
@@ -1105,8 +1516,9 @@ export function apply(ctx, config) {
     timeoutMs: options.timeoutMs,
     modelSlug: options.chatgptModelSlug,
     transport: options.chatgptTransport,
-    cdpPort: options.chatgptCdpPort,
-    cdpHost: options.chatgptCdpHost,
+    cdpPort: chatgptBrowserPort,
+    cdpHost: chatgptBrowserHost,
+    ensureHeadless: () => chatgptHeadless.ensure(),
     userAgent: options.userAgent,
     secChUa: options.secChUa,
     secChUaPlatform: options.secChUaPlatform,
@@ -1145,6 +1557,8 @@ export function apply(ctx, config) {
       profileDir,
       logger,
       chatgpt: { adapter: chatgptAdapter, state: chatgptState },
+      headless,
+      chatgptHeadless,
     })
     for (const path of [
       '/my-model/api/status',
@@ -1152,10 +1566,14 @@ export function apply(ctx, config) {
       '/my-model/api/test',
       '/my-model/api/default',
       '/my-model/api/fingerprint',
+      '/my-model/api/deepseek/transport',
+      '/my-model/api/deepseek/launch',
+      '/my-model/api/deepseek/headless',
       '/my-model/api/chatgpt/status',
       '/my-model/api/chatgpt/credentials',
       '/my-model/api/chatgpt/test',
       '/my-model/api/chatgpt/transport',
+      '/my-model/api/chatgpt/headless',
       '/my-model/api/chatgpt/launch',
     ]) {
       httpCtx.effect(() => httpCtx.webServer.register({ kind: 'exact', path, handler }))

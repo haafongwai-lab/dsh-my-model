@@ -114,7 +114,7 @@ pendingWebServer({
     effects.push(dispose)
   },
 })
-assert.equal(routes.size, 10, 'all settings routes registered once webServer is ready')
+assert.equal(routes.size, 14, 'all settings routes registered once webServer is ready')
 
 function request(url, body) {
   const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))])
@@ -151,6 +151,18 @@ assert.equal(status.chatgpt.provider.id, CHATGPT_PROVIDER)
 assert.equal(status.chatgpt.token.configured, false)
 assert.equal(status.chatgpt.models.length, 1)
 assert.equal(status.chatgpt.baseURL, 'https://chatgpt.com')
+assert.equal(status.chatgpt.headless.host, '127.0.0.1')
+assert.equal(status.chatgpt.headless.port, 9224)
+assert.equal(typeof status.chatgpt.headless.running, 'boolean')
+assert.equal(status.transport, 'node')
+assert.equal(status.cdp.host, '127.0.0.1')
+assert.equal(status.cdp.port, 9222)
+assert.equal(status.headless.host, '127.0.0.1')
+assert.equal(status.headless.port, 9223)
+// Do not assert a fixed value: a real managed Chromium may be listening on the
+// default port while the tests run (the same environment dependence that made
+// the CDP test use its own port). Only the shape of the probe is guaranteed.
+assert.equal(typeof status.headless.running, 'boolean')
 
 const saveRes = response()
 await routes.get('/my-model/api/credentials')(
@@ -239,6 +251,60 @@ assert.equal(unknownDefaultRes.status, 400)
   assert.equal(existsSync(join(profileDir, '.my-model.json')), false, 'reset removes the overrides file')
 }
 
+// DeepSeek has the same switch, but its CDP transport falls back to Node when
+// Chrome is closed. The port here is one nothing listens on.
+{
+  const transportRes = response()
+  await routes.get('/my-model/api/deepseek/transport')(
+    request('/my-model/api/deepseek/transport', { transport: 'cdp', port: 65002 }),
+    transportRes,
+  )
+  assert.equal(transportRes.status, 200)
+  const payload = JSON.parse(transportRes.body)
+  assert.equal(payload.transport, 'cdp')
+  assert.equal(payload.cdp.port, 65002)
+  assert.equal(globalThis.__adapter.client.transport, 'cdp')
+  const persisted = JSON.parse(readFileSync(join(profileDir, '.my-model-deepseek.json'), 'utf8'))
+  assert.equal(persisted.transport, 'cdp')
+  assert.equal(persisted.cdpPort, 65002)
+
+  const badTransport = response()
+  await routes.get('/my-model/api/deepseek/transport')(
+    request('/my-model/api/deepseek/transport', { transport: 'carrier-pigeon' }),
+    badTransport,
+  )
+  assert.equal(badTransport.status, 400)
+
+  const headlessRes = response()
+  await routes.get('/my-model/api/deepseek/transport')(
+    request('/my-model/api/deepseek/transport', { transport: 'headless' }),
+    headlessRes,
+  )
+  assert.equal(headlessRes.status, 200)
+  const headlessPayload = JSON.parse(headlessRes.body)
+  assert.equal(headlessPayload.transport, 'headless')
+  assert.equal(headlessPayload.headless.port, 9223)
+  assert.equal(headlessPayload.cdp.port, 9223, 'the client points at the managed port')
+  assert.equal(globalThis.__adapter.client.transport, 'headless')
+  const headlessPersisted = JSON.parse(readFileSync(join(profileDir, '.my-model-deepseek.json'), 'utf8'))
+  assert.equal(headlessPersisted.transport, 'headless')
+  assert.equal(headlessPersisted.cdpPort, 65002, 'the visible Chrome endpoint is preserved')
+  assert.equal(headlessPersisted.headlessPort, 9223)
+
+  const backRes = response()
+  await routes.get('/my-model/api/deepseek/transport')(
+    request('/my-model/api/deepseek/transport', { transport: 'node' }),
+    backRes,
+  )
+  assert.equal(JSON.parse(backRes.body).transport, 'node')
+
+  const badPort = response()
+  await routes.get('/my-model/api/deepseek/launch')(request('/my-model/api/deepseek/launch', { port: 0 }), badPort)
+  assert.equal(badPort.status, 400)
+  assert.equal(JSON.parse(badPort.body).error.code, 'BAD_PORT')
+  assert.equal(globalThis.__adapter.client.transport, 'node', 'a rejected launch leaves the transport untouched')
+}
+
 // The transport switch is applied immediately and persisted per profile; in CDP
 // mode a connection test must not demand a pasted credential. The port is one
 // nothing listens on, so the assertion does not depend on whether the machine
@@ -275,12 +341,31 @@ assert.equal(unknownDefaultRes.status, 400)
   )
   assert.equal(badTransport.status, 400)
 
+  // The managed headless transport is a third option; switching to it points
+  // the client at its own port and preserves the visible endpoint for later.
+  const headlessRes = response()
+  await routes.get('/my-model/api/chatgpt/transport')(
+    request('/my-model/api/chatgpt/transport', { transport: 'headless' }),
+    headlessRes,
+  )
+  assert.equal(headlessRes.status, 200)
+  const headlessPayload = JSON.parse(headlessRes.body)
+  assert.equal(headlessPayload.chatgpt.transport, 'headless')
+  assert.equal(headlessPayload.chatgpt.headless.port, 9224)
+  assert.equal(globalThis.__chatgptAdapter.client.transport, 'headless')
+  assert.equal(globalThis.__chatgptAdapter.client.cdpPort, 9224, 'the client points at the managed port')
+  const headlessPersisted = JSON.parse(readFileSync(join(profileDir, '.my-model-chatgpt.json'), 'utf8'))
+  assert.equal(headlessPersisted.transport, 'headless')
+  assert.equal(headlessPersisted.cdpPort, 65001, 'the visible Chrome endpoint is preserved')
+  assert.equal(headlessPersisted.headlessPort, 9224)
+
   const backRes = response()
   await routes.get('/my-model/api/chatgpt/transport')(
     request('/my-model/api/chatgpt/transport', { transport: 'node' }),
     backRes,
   )
   assert.equal(JSON.parse(backRes.body).chatgpt.transport, 'node')
+  assert.equal(globalThis.__chatgptAdapter.client.cdpPort, 65001, 'leaving headless restores the visible port')
 
   // The launcher validates its input before touching the machine, so an invalid
   // body never spawns a browser (and is safe to exercise in a test).

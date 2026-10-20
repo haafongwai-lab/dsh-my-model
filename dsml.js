@@ -415,15 +415,22 @@ export function buildTranscriptPrompt({ system, messages, tools, maxChars = 1_00
   ].join('\n')
 
   let body = conversation.join('\n\n')
-  const fixed = [header, ...systemParts].join('\n\n')
+  let fixed = [header, ...systemParts].join('\n\n')
   if (fixed.length + body.length <= maxChars) return `${fixed}\n\n${body}`.trim()
+
+  // A large tool catalogue can fill the whole budget on its own. Keep the
+  // conversation room to breathe instead of letting system text crowd it out.
+  if (fixed.length > maxChars * 0.6) {
+    fixed = truncate(fixed, Math.floor(maxChars * 0.6))
+  }
 
   let kept = conversation.slice()
   while (kept.length > 1 && fixed.length + kept.join('\n\n').length + 60 > maxChars) kept.shift()
   if (kept.length < conversation.length) kept.unshift('[... earlier conversation omitted ...]')
   body = kept.join('\n\n')
-  const available = Math.max(4000, maxChars - fixed.length - 2)
-  return `${fixed}\n\n${truncate(body, available)}`.trim()
+  const available = Math.max(2000, maxChars - fixed.length - 2)
+  const combined = `${fixed}\n\n${truncate(body, available)}`.trim()
+  return combined.length <= maxChars ? combined : truncate(combined, maxChars)
 }
 
 /**

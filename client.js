@@ -16,6 +16,12 @@ window.__ModuleLoader__.load({
       'chatgpt.descCdp': '登录态由本机 Chrome 窗口提供，下面的 Token / Cookie 可以留空。',
       'chatgpt.cdpReady': '已连上 Chrome',
       'chatgpt.cdpMissing': '未连上 Chrome',
+      'chatgpt.headlessDesc':
+        '常驻无头 Chromium 在后台保持一个已登录 chatgpt.com 的浏览器，关闭所有可见 Chrome 窗口也不影响调用；Harness 重启后会接管仍在运行的实例。',
+      'chatgpt.headlessReady': '无头 Chromium 已运行',
+      'chatgpt.headlessMissing': '无头 Chromium 未运行',
+      'chatgpt.headlessHint':
+        '无头 profile 与可视 Chrome 不共享登录态：启动时会尝试从本机 Chrome 复制 chatgpt.com Cookie（含 cf_clearance）；复制不到时请在下方粘贴 Cookie。',
       'chatgpt.help.summary': '如何获取 ChatGPT 登录态',
       'chatgpt.help.step1': '在浏览器打开 chatgpt.com 并登录。',
       'chatgpt.help.step2': 'F12 打开开发者工具 → Network，任选一条 backend-api 请求。',
@@ -28,6 +34,9 @@ window.__ModuleLoader__.load({
       'transport.label': '传输方式',
       'transport.node': 'Node 直连',
       'transport.cdp': '本机 Chrome',
+      'transport.cdpWithFallback': '本机 Chrome（自动回退）',
+      'transport.headless': '常驻无头 Chromium',
+      'transport.useHeadless': '改用常驻无头 Chromium',
       'transport.desc':
         'Node 直连会带上非浏览器的 TLS 指纹，容易被 Cloudflare 判定为「设备异常」（HTTP 403 Unusual activity）。改用本机 Chrome 后，请求在已登录 chatgpt.com 的页面里发出，TLS、HTTP/2、Cookie 与指纹都是浏览器的。',
       'transport.useNode': '改用 Node 直连',
@@ -46,6 +55,32 @@ window.__ModuleLoader__.load({
         '用独立配置目录打开一个可调试的 Chrome 窗口并自动切到「本机 Chrome」。首次请在该窗口登录 chatgpt.com，之后保持打开即可。',
       'launch.started': 'Chrome 已启动，请在该窗口登录 chatgpt.com。',
       'launch.alreadyRunning': '调试端口已在监听，已切到「本机 Chrome」。',
+      'deepseekTransport.desc':
+        'Node 直连带的是 Harness 自己的 TLS 指纹；本机 Chrome 会在已登录 chat.deepseek.com 的标签页里发出请求，TLS、HTTP/2、Cookie 与浏览器指纹都来自 Chrome。',
+      'deepseekTransport.fallback':
+        '关闭 Chrome、调试端口不可用或标签页不存在时，会自动回退到 Node 直连；已同步的浏览器 Cookie 与缓存的 Token 会继续使用，Harness 不会因此中断调用。',
+      'deepseekTransport.cdpReady': '已连上 Chrome',
+      'deepseekTransport.cdpMissing': '未连上 Chrome',
+      'deepseekTransport.descCdp': '登录态由本机 Chrome 窗口提供，Token / Cookie 可以留空。',
+      'deepseekTransport.step3':
+        '在那个窗口登录 chat.deepseek.com，然后点「改用本机 Chrome」并重新测试连接。关闭窗口后会自动回退 Node。',
+      'deepseekTransport.headlessDesc':
+        '常驻无头 Chromium 使用独立 profile 和调试端口，由 Harness 后台保持运行；关闭所有可见 Chrome 窗口也不影响调用。该模式不走 Node，要求已保存 Token（或先用本机 Chrome 同步一次登录态）。',
+      'deepseekTransport.headlessHint':
+        '首次使用会自动启动无头 Chromium。Harness 重启后会接管仍在运行的实例；Cookie 与 Token 会在首次请求时注入。',
+      'deepseekTransport.headlessReady': '无头 Chromium 已运行',
+      'deepseekTransport.headlessMissing': '无头 Chromium 未运行（首次请求会自动启动）',
+      'deepseekLaunch.headlessAction': '启动常驻无头 Chromium',
+      'deepseekLaunch.headlessStarting': '正在启动无头 Chromium…',
+      'deepseekLaunch.headlessStarted': '无头 Chromium 已启动并切换。',
+      'deepseekLaunch.headlessRunning': '无头 Chromium 已在运行，已切换。',
+      'deepseekLaunch.action': '启动本地 Chrome 并登录 DeepSeek',
+      'deepseekLaunch.starting': '正在启动 Chrome…',
+      'deepseekLaunch.hint':
+        '用独立配置目录打开一个可调试的 Chrome 窗口并自动切到「本机 Chrome」。首次请在该窗口登录 chat.deepseek.com；关闭窗口后会回退 Node，Harness 仍可调用。',
+      'deepseekLaunch.started': 'Chrome 已启动，请在该窗口登录 chat.deepseek.com。',
+      'deepseekLaunch.alreadyRunning':
+        '调试端口已在监听，已切到「本机 Chrome」；请确认已打开 chat.deepseek.com。',
       'token.label': 'User Token',
       'token.placeholder.empty': '粘贴 chat.deepseek.com 的 userToken',
       'token.placeholder.saved': '已保存，留空保持不变',
@@ -118,6 +153,12 @@ window.__ModuleLoader__.load({
       'chatgpt.descCdp': 'The local Chrome window provides the session, so Token and Cookie can stay empty.',
       'chatgpt.cdpReady': 'Chrome attached',
       'chatgpt.cdpMissing': 'Chrome not attached',
+      'chatgpt.headlessDesc':
+        'The managed headless Chromium keeps a signed-in chatgpt.com browser running in the background, so closing every visible Chrome window does not affect calls. A Harness restart adopts the still-running instance.',
+      'chatgpt.headlessReady': 'Headless Chromium running',
+      'chatgpt.headlessMissing': 'Headless Chromium not running',
+      'chatgpt.headlessHint':
+        'The headless profile does not share the visible Chrome login. Launching tries to copy the chatgpt.com cookies (including cf_clearance) from local Chrome; if that fails, paste the cookies below.',
       'chatgpt.help.summary': 'How to get a ChatGPT login',
       'chatgpt.help.step1': 'Open chatgpt.com in a browser and sign in.',
       'chatgpt.help.step2': 'Open DevTools → Network and pick any backend-api request.',
@@ -133,6 +174,9 @@ window.__ModuleLoader__.load({
       'transport.label': 'Transport',
       'transport.node': 'Node fetch',
       'transport.cdp': 'Local Chrome',
+      'transport.cdpWithFallback': 'Local Chrome (auto fallback)',
+      'transport.headless': 'Managed headless Chromium',
+      'transport.useHeadless': 'Use managed headless Chromium',
       'transport.desc':
         'Node fetch carries a non-browser TLS fingerprint, which Cloudflare scores as “unusual activity” (HTTP 403). With local Chrome the request runs inside your logged-in chatgpt.com tab, so TLS, HTTP/2, cookies and client hints are the browser’s own.',
       'transport.useNode': 'Use Node fetch',
@@ -152,6 +196,32 @@ window.__ModuleLoader__.load({
         'Opens a debuggable Chrome window on a dedicated profile and switches to “Local Chrome”. Sign in to chatgpt.com there once, then keep the window open.',
       'launch.started': 'Chrome started — sign in to chatgpt.com in that window.',
       'launch.alreadyRunning': 'A debug port is already listening; switched to “Local Chrome”.',
+      'deepseekTransport.desc':
+        'Node fetch carries Harness’s own TLS fingerprint. Local Chrome runs the request inside a signed-in chat.deepseek.com tab, so TLS, HTTP/2, cookies and client hints are the browser’s own.',
+      'deepseekTransport.fallback':
+        'If Chrome is closed, the debug port is unavailable, or the tab is missing, the client automatically falls back to Node fetch using the synced browser cookies and cached token — a Harness call never depends on the window staying open.',
+      'deepseekTransport.cdpReady': 'Chrome attached',
+      'deepseekTransport.cdpMissing': 'Chrome not attached',
+      'deepseekTransport.descCdp': 'The local Chrome window provides the session, so Token and Cookie can stay empty.',
+      'deepseekTransport.step3':
+        'Sign in to chat.deepseek.com in that window, then choose “Use local Chrome” and test the connection again. Closing the window falls back to Node.',
+      'deepseekTransport.headlessDesc':
+        'The managed headless Chromium keeps its own profile and debug port alive in the background, so closing every visible Chrome window does not affect calls. This mode never falls back to Node; it needs a saved Token (or one synced once through local Chrome).',
+      'deepseekTransport.headlessHint':
+        'The headless browser starts automatically on first use. A Harness restart adopts the still-running instance; cookies and the token are injected on the first request.',
+      'deepseekTransport.headlessReady': 'Headless Chromium running',
+      'deepseekTransport.headlessMissing': 'Headless Chromium not running (starts on first use)',
+      'deepseekLaunch.headlessAction': 'Start managed headless Chromium',
+      'deepseekLaunch.headlessStarting': 'Starting headless Chromium…',
+      'deepseekLaunch.headlessStarted': 'Headless Chromium started and selected.',
+      'deepseekLaunch.headlessRunning': 'Headless Chromium already running; selected.',
+      'deepseekLaunch.action': 'Launch Chrome for DeepSeek',
+      'deepseekLaunch.starting': 'Starting Chrome…',
+      'deepseekLaunch.hint':
+        'Opens a debuggable Chrome window on a dedicated profile and switches to “Local Chrome”. Sign in to chat.deepseek.com there once; closing it falls back to Node without breaking Harness.',
+      'deepseekLaunch.started': 'Chrome started — sign in to chat.deepseek.com in that window.',
+      'deepseekLaunch.alreadyRunning':
+        'A debug port is already listening; switched to “Local Chrome”. Confirm chat.deepseek.com is open.',
       'token.label': 'User token',
       'token.placeholder.empty': 'Paste the chat.deepseek.com userToken',
       'token.placeholder.saved': 'Saved — leave blank to keep it',
@@ -244,11 +314,13 @@ window.__ModuleLoader__.load({
 .dsh-mm-textarea::placeholder{color:var(--dsw-alias-label-dimmed)}
 .dsh-mm-textarea:focus{border-color:var(--dsw-alias-state-business-primary);outline:none}
 .dsh-mm-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+.dsh-mm-actions.even{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr)}
+.dsh-mm-actions.even>.dsh-mm-button{width:100%;min-width:0;padding-left:10px;padding-right:10px}
 /* One control system for every button on the page. The shared base fixes the
    box model, kills inherited transforms/filters/animation, and limits motion to
    colour only — so no state can ever resize or nudge a control. */
-.dsh-mm-button,.dsh-mm-link{-webkit-appearance:none;appearance:none;box-sizing:border-box;margin:0;border:0;background-color:transparent;background-image:none;color:var(--dsw-alias-label-primary);font:inherit;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;text-align:center;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;transform:none;filter:none;animation:none;will-change:auto;transition:background-color .12s ease,border-color .12s ease,color .12s ease,opacity .12s ease}
-.dsh-mm-button{height:36px;padding:0 14px;border-radius:var(--dsw-radius-md,12px);gap:4px;font-size:14px;line-height:22px}
+.dsh-mm-button,.dsh-mm-link,.dsh-mm-segment{-webkit-appearance:none;appearance:none;box-sizing:border-box;margin:0;border:0;background-color:transparent;background-image:none;color:var(--dsw-alias-label-primary);font:inherit;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;text-align:center;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;transform:none;filter:none;animation:none;will-change:auto;transition:background-color .12s ease,border-color .12s ease,color .12s ease,box-shadow .12s ease,opacity .12s ease}
+.dsh-mm-button{height:36px;min-width:104px;padding:0 14px;border-radius:var(--dsw-radius-md,12px);gap:4px;font-size:14px;line-height:22px}
 .dsh-mm-button:not(.primary):not(.danger){border:.5px solid var(--dsw-alias-border-l3)}
 .dsh-mm-button:hover:not(:disabled){background-color:var(--dsw-alias-interactive-bg-hover-solid)}
 .dsh-mm-button:active:not(:disabled){background-color:var(--dsw-alias-interactive-bg-hover-solid)}
@@ -257,10 +329,16 @@ window.__ModuleLoader__.load({
 .dsh-mm-button.danger{color:var(--dsw-alias-state-error-primary)}
 .dsh-mm-button.danger:hover:not(:disabled),.dsh-mm-button.danger:active:not(:disabled){background-color:var(--dsw-alias-interactive-bg-hover-danger)}
 .dsh-mm-button:disabled{cursor:default;opacity:.4}
-.dsh-mm-link{height:28px;padding:0 10px;border-radius:var(--dsw-radius-sm,8px);gap:4px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
+.dsh-mm-link{height:28px;padding:0 8px;border-radius:var(--dsw-radius-sm,8px);gap:4px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
 .dsh-mm-link:hover:not(:disabled){background-color:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
 .dsh-mm-link:disabled{cursor:default;opacity:.4}
-.dsh-mm-button:focus-visible,.dsh-mm-link:focus-visible,.dsh-mm-summary:focus-visible{box-shadow:0 0 0 var(--dsw-focus-ring-width,2px) var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline:none}
+.dsh-mm-segmented{background:var(--dsw-alias-bg-layer-1);border-radius:var(--dsw-radius-md,12px);box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l4);box-sizing:border-box;display:flex;gap:3px;padding:3px;width:100%}
+.dsh-mm-segment{border-radius:var(--dsw-radius-sm,8px);color:var(--dsw-alias-label-tertiary);flex:1 1 0;font-size:12px;font-weight:500;height:30px;line-height:18px;min-width:0;padding:0 8px;white-space:nowrap}
+.dsh-mm-segment:hover:not(:disabled):not([aria-pressed="true"]){background-color:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
+.dsh-mm-segment[aria-pressed="true"]{background-color:var(--dsw-alias-bg-layer-3);box-shadow:0 0 0 .5px var(--dsw-alias-border-l3),0 1px 2px rgba(0,0,0,.06);color:var(--dsw-alias-label-primary)}
+.dsh-mm-segment:disabled{cursor:default;opacity:.4}
+.dsh-mm-segment[aria-pressed="true"]:disabled{cursor:default;opacity:1}
+.dsh-mm-button:focus-visible,.dsh-mm-link:focus-visible,.dsh-mm-segment:focus-visible,.dsh-mm-summary:focus-visible{box-shadow:0 0 0 var(--dsw-focus-ring-width,2px) var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline:none}
 /* Defence in depth: host stylesheets sometimes attach a lift/filter/animation
    to every interactive element. Re-assert the neutral state on every pseudo
    class so a hover can never produce a 1px jump. */
@@ -273,6 +351,10 @@ window.__ModuleLoader__.load({
 .dsh-mm-section .dsh-mm-link:hover,
 .dsh-mm-section .dsh-mm-link:active,
 .dsh-mm-section .dsh-mm-link:focus-visible,
+.dsh-mm-section .dsh-mm-segment,
+.dsh-mm-section .dsh-mm-segment:hover,
+.dsh-mm-section .dsh-mm-segment:active,
+.dsh-mm-section .dsh-mm-segment:focus-visible,
 .dsh-mm-section .dsh-mm-summary,
 .dsh-mm-section .dsh-mm-summary:hover{transform:none;filter:none;animation:none;will-change:auto}
 .dsh-mm-hint{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
@@ -294,7 +376,7 @@ window.__ModuleLoader__.load({
 .dsh-mm-messageLine{align-items:center;display:flex;flex-wrap:wrap;gap:4px}
 .dsh-mm-notice{color:var(--dsw-alias-state-warn-label);font-size:12px;line-height:18px;margin:0}
 .dsh-mm-code{background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-sm,8px);color:var(--dsw-alias-label-secondary);display:block;font-family:var(--ds-font-family-code);font-size:12px;line-height:18px;margin:6px 0 0;overflow-x:auto;padding:6px 8px;white-space:pre}
-@media (max-width:560px){.dsh-mm-card{padding:12px}.dsh-mm-editor{padding:12px}.dsh-mm-rowMeta{display:none}}
+@media (max-width:560px){.dsh-mm-card{padding:12px}.dsh-mm-editor{padding:12px}.dsh-mm-rowMeta{display:none}.dsh-mm-actions.even{display:flex;flex-wrap:wrap}.dsh-mm-actions.even>.dsh-mm-button{flex:1 1 100%;width:100%}.dsh-mm-segmented{flex-direction:column}.dsh-mm-segment{flex:none;width:100%}}
 @media (prefers-reduced-motion:reduce){.dsh-mm-summary::before{transition:none}}
 `
 
@@ -540,6 +622,58 @@ nav button:has(.dsh-mm-navGlyph)>svg{display:none}
           }
         }
 
+        const setDeepseekTransport = async (mode) => {
+          setBusy('deepseekTransport')
+          setMessage(null)
+          try {
+            const next = await request('/my-model/api/deepseek/transport', { transport: mode })
+            setStatus(next)
+            setMessage({ kind: 'ok', text: t('transport.saved') })
+          } catch (error) {
+            setMessage({ kind: 'error', text: error.message ?? String(error) })
+          } finally {
+            setBusy('')
+          }
+        }
+
+        const launchDeepseekChrome = async () => {
+          setBusy('deepseekLaunchChrome')
+          setMessage(null)
+          try {
+            const result = await request('/my-model/api/deepseek/launch', {})
+            setStatus(result.status ?? status)
+            setMessage({
+              kind: 'ok',
+              text: result.launch?.alreadyRunning
+                ? t('deepseekLaunch.alreadyRunning')
+                : t('deepseekLaunch.started'),
+            })
+          } catch (error) {
+            setMessage({ kind: 'error', text: error.message ?? String(error) })
+          } finally {
+            setBusy('')
+          }
+        }
+
+        const startDeepseekHeadless = async () => {
+          setBusy('deepseekHeadless')
+          setMessage(null)
+          try {
+            const result = await request('/my-model/api/deepseek/headless', {})
+            setStatus(result.status ?? status)
+            setMessage({
+              kind: 'ok',
+              text: result.headless?.alreadyRunning
+                ? t('deepseekLaunch.headlessRunning')
+                : t('deepseekLaunch.headlessStarted'),
+            })
+          } catch (error) {
+            setMessage({ kind: 'error', text: error.message ?? String(error) })
+          } finally {
+            setBusy('')
+          }
+        }
+
         const setTransport = async (mode) => {
           setBusy('transport')
           setMessage(null)
@@ -563,6 +697,25 @@ nav button:has(.dsh-mm-navGlyph)>svg{display:none}
             setMessage({
               kind: 'ok',
               text: result.launch?.alreadyRunning ? t('launch.alreadyRunning') : t('launch.started'),
+            })
+          } catch (error) {
+            setMessage({ kind: 'error', text: error.message ?? String(error) })
+          } finally {
+            setBusy('')
+          }
+        }
+
+        const startChatgptHeadless = async () => {
+          setBusy('chatgptHeadless')
+          setMessage(null)
+          try {
+            const result = await request('/my-model/api/chatgpt/headless', {})
+            setStatus(result.status ?? status)
+            setMessage({
+              kind: 'ok',
+              text: result.headless?.alreadyRunning
+                ? t('deepseekLaunch.headlessRunning')
+                : t('deepseekLaunch.headlessStarted'),
             })
           } catch (error) {
             setMessage({ kind: 'error', text: error.message ?? String(error) })
@@ -628,6 +781,18 @@ nav button:has(.dsh-mm-navGlyph)>svg{display:none}
         const tokenConfigured = status?.token?.configured === true
         const cookieConfigured = status?.cookies?.configured === true
         const active = status?.provider?.active === true
+        // Chrome mode can use the tab's localStorage token, so it is usable
+        // with both fields empty; closing Chrome falls back to Node in the host.
+        const deepseekViaCdp = status?.transport === 'cdp'
+        const deepseekViaHeadless = status?.transport === 'headless'
+        const deepseekCdpReady = status?.cdp?.reachable === true
+        const deepseekHeadlessReady = status?.headless?.running === true
+        const deepseekBrowserMode = deepseekViaCdp || deepseekViaHeadless
+        // Headless owns its own profile, so it needs a stored token; it starts
+        // on demand, which is why readiness only depends on the token.
+        const deepseekReady = deepseekViaHeadless
+          ? tokenConfigured
+          : tokenConfigured || (deepseekViaCdp && deepseekCdpReady)
         const models = Array.isArray(status?.models) ? status.models : []
         // The model list shows both providers; each model remembers where it
         // routes so "set as default" can pick the right account.
@@ -640,18 +805,28 @@ nav button:has(.dsh-mm-navGlyph)>svg{display:none}
         ]
         const chatgptTokenConfigured = status?.chatgpt?.token?.configured === true
         const chatgptCookieConfigured = status?.chatgpt?.cookies?.configured === true
-        // Over CDP the browser tab holds the session, so no token is needed and
-        // the test must stay clickable with both fields empty.
+        // Over CDP the browser tab holds the session; over headless the managed
+        // profile does. Neither needs a pasted token.
         const chatgptViaCdp = status?.chatgpt?.transport === 'cdp'
+        const chatgptViaHeadless = status?.chatgpt?.transport === 'headless'
+        const chatgptBrowserMode = chatgptViaCdp || chatgptViaHeadless
         const chatgptCdpReady = status?.chatgpt?.cdp?.reachable === true
+        const chatgptHeadlessReady = status?.chatgpt?.headless?.running === true
+        const chatgptProfileReady = chatgptViaCdp
+          ? chatgptCdpReady
+          : chatgptViaHeadless
+            ? chatgptHeadlessReady && (chatgptTokenConfigured || chatgptCookieConfigured)
+            : chatgptTokenConfigured
         const canSaveChatgpt = Boolean(chatgptToken.trim() || chatgptCookies.trim())
         const canTestChatgpt =
-          chatgptViaCdp || chatgptTokenConfigured || Boolean(chatgptToken.trim()) || chatgptCookieConfigured
-        const chatgptReady = chatgptViaCdp ? chatgptCdpReady : chatgptTokenConfigured
+          chatgptBrowserMode || chatgptTokenConfigured || Boolean(chatgptToken.trim()) || chatgptCookieConfigured
+        const chatgptReady = chatgptProfileReady
         const fp = fpDraft ?? status?.fingerprint ?? null
         const fpEditable = status?.fingerprint?.persistable === true
         const canSave = Boolean(token.trim() || cookies.trim())
-        const canTest = tokenConfigured || Boolean(token.trim())
+        const canTest = deepseekViaHeadless
+          ? tokenConfigured || Boolean(token.trim())
+          : deepseekBrowserMode || tokenConfigured || Boolean(token.trim())
         const retry = () => {
           setMessage(null)
           load()
@@ -710,7 +885,7 @@ nav button:has(.dsh-mm-navGlyph)>svg{display:none}
                 'div',
                 { className: 'dsh-mm-rowHead' },
                 h('span', {
-                  className: `dsh-mm-dot ${tokenConfigured ? 'on' : 'off'}`,
+                  className: `dsh-mm-dot ${deepseekReady ? 'on' : 'off'}`,
                   'aria-hidden': true,
                 }),
                 h('span', { className: 'dsh-mm-name' }, t('account.title')),
@@ -719,9 +894,19 @@ nav button:has(.dsh-mm-navGlyph)>svg{display:none}
               h(
                 'p',
                 { className: 'dsh-mm-rowDesc' },
-                `${tokenConfigured ? t('status.configured') : t('status.missing')}${
-                  tokenConfigured && sourceText(status?.token) ? ` · ${sourceText(status?.token)}` : ''
-                } · ${t('account.desc')}`,
+                deepseekViaHeadless
+                  ? `${
+                      deepseekHeadlessReady
+                        ? t('deepseekTransport.headlessReady')
+                        : t('deepseekTransport.headlessMissing')
+                    } · ${t('deepseekTransport.headlessHint')}`
+                  : deepseekViaCdp
+                    ? `${
+                        deepseekCdpReady ? t('deepseekTransport.cdpReady') : t('deepseekTransport.cdpMissing')
+                      } · ${t('deepseekTransport.descCdp')}`
+                    : `${tokenConfigured ? t('status.configured') : t('status.missing')}${
+                        tokenConfigured && sourceText(status?.token) ? ` · ${sourceText(status?.token)}` : ''
+                      } · ${t('account.desc')}`,
               ),
               status?.lastFailure
                 ? h(
@@ -782,7 +967,7 @@ nav button:has(.dsh-mm-navGlyph)>svg{display:none}
                 ),
                 h(
                   'div',
-                  { className: 'dsh-mm-actions' },
+                  { className: 'dsh-mm-actions even' },
                   h(
                     'button',
                     {
@@ -807,6 +992,134 @@ nav button:has(.dsh-mm-navGlyph)>svg{display:none}
                       onClick: clear,
                     },
                     busy === 'clear' ? t('action.clearing') : t('action.clear'),
+                  ),
+                ),
+                h(
+                  'div',
+                  { className: 'dsh-mm-field' },
+                  h(
+                    'div',
+                    { className: 'dsh-mm-fieldHead' },
+                    h('span', { className: 'dsh-mm-fieldLabel' }, t('transport.label')),
+                  ),
+                  h(
+                    'p',
+                    { className: 'dsh-mm-hint' },
+                    deepseekViaHeadless ? t('deepseekTransport.headlessDesc') : t('deepseekTransport.desc'),
+                  ),
+                  h(
+                    'p',
+                    { className: 'dsh-mm-hint' },
+                    deepseekViaHeadless ? t('deepseekTransport.headlessHint') : t('deepseekTransport.fallback'),
+                  ),
+                  h(
+                    'div',
+                    { className: 'dsh-mm-actions even' },
+                    h(
+                      'button',
+                      {
+                        className: 'dsh-mm-button',
+                        type: 'button',
+                        disabled: Boolean(busy),
+                        onClick: launchDeepseekChrome,
+                      },
+                      busy === 'deepseekLaunchChrome' ? t('deepseekLaunch.starting') : t('deepseekLaunch.action'),
+                    ),
+                    h(
+                      'button',
+                      {
+                        className: 'dsh-mm-button',
+                        type: 'button',
+                        disabled: Boolean(busy),
+                        onClick: startDeepseekHeadless,
+                      },
+                      busy === 'deepseekHeadless'
+                        ? t('deepseekLaunch.headlessStarting')
+                        : t('deepseekLaunch.headlessAction'),
+                    ),
+                  ),
+                  h(
+                    'div',
+                    {
+                      className: 'dsh-mm-segmented',
+                      role: 'group',
+                      'aria-label': t('transport.label'),
+                    },
+                    h(
+                      'button',
+                      {
+                        className: 'dsh-mm-segment',
+                        type: 'button',
+                        'aria-pressed': !deepseekViaCdp && !deepseekViaHeadless,
+                        disabled: Boolean(busy) || (!deepseekViaCdp && !deepseekViaHeadless),
+                        onClick: () => setDeepseekTransport('node'),
+                      },
+                      t('transport.node'),
+                    ),
+                    h(
+                      'button',
+                      {
+                        className: 'dsh-mm-segment',
+                        type: 'button',
+                        'aria-pressed': deepseekViaCdp,
+                        disabled: Boolean(busy) || deepseekViaCdp,
+                        onClick: () => setDeepseekTransport('cdp'),
+                      },
+                      t('transport.cdp'),
+                    ),
+                    h(
+                      'button',
+                      {
+                        className: 'dsh-mm-segment',
+                        type: 'button',
+                        'aria-pressed': deepseekViaHeadless,
+                        disabled: Boolean(busy) || deepseekViaHeadless,
+                        onClick: () => setDeepseekTransport('headless'),
+                      },
+                      t('transport.headless'),
+                    ),
+                  ),
+                  deepseekViaHeadless
+                    ? status.headless
+                      ? h(
+                          'p',
+                          { className: 'dsh-mm-hint' },
+                          status.headless.running
+                            ? `${t('deepseekTransport.headlessReady')} · pid ${status.headless.pid ?? '?'} · ${status.headless.host}:${status.headless.port}`
+                            : `${t('deepseekTransport.headlessMissing')} · ${status.headless.host}:${status.headless.port}`,
+                        )
+                      : null
+                    : status.cdp
+                      ? h(
+                          'p',
+                          { className: 'dsh-mm-hint' },
+                          status.cdp.reachable
+                            ? `${t('transport.reachable')} · ${status.cdp.browser ?? 'Chromium'} · ${status.cdp.host}:${status.cdp.port}`
+                            : `${t('transport.unreachable')} (${status.cdp.host}:${status.cdp.port})`,
+                        )
+                      : null,
+                  deepseekViaHeadless
+                    ? null
+                    : h(
+                        'details',
+                        { className: 'dsh-mm-details' },
+                        h('summary', { className: 'dsh-mm-summary' }, t('transport.howto')),
+                        h(
+                          'ol',
+                          { className: 'dsh-mm-steps' },
+                          h('li', null, t('transport.step1')),
+                          h(
+                            'li',
+                            null,
+                            t('transport.step2'),
+                            h(
+                              'code',
+                              { className: 'dsh-mm-code' },
+                          'chrome.exe --remote-debugging-port=9222 --user-data-dir="%LOCALAPPDATA%\\dsh-chrome"',
+                        ),
+                      ),
+                      h('li', null, t('deepseekTransport.step3')),
+                    ),
                   ),
                 ),
               ),
@@ -845,13 +1158,15 @@ nav button:has(.dsh-mm-navGlyph)>svg{display:none}
                   h(
                     'p',
                     { className: 'dsh-mm-rowDesc' },
-                    chatgptViaCdp
-                      ? `${chatgptCdpReady ? t('chatgpt.cdpReady') : t('chatgpt.cdpMissing')} · ${t('chatgpt.descCdp')}`
-                      : `${chatgptTokenConfigured ? t('status.configured') : t('status.missing')}${
-                          chatgptTokenConfigured && sourceText(status.chatgpt.token)
-                            ? ` · ${sourceText(status.chatgpt.token)}`
-                            : ''
-                        } · ${t('chatgpt.desc')}`,
+                    chatgptViaHeadless
+                      ? `${chatgptHeadlessReady ? t('chatgpt.headlessReady') : t('chatgpt.headlessMissing')} · ${t('chatgpt.headlessDesc')}`
+                      : chatgptViaCdp
+                        ? `${chatgptCdpReady ? t('chatgpt.cdpReady') : t('chatgpt.cdpMissing')} · ${t('chatgpt.descCdp')}`
+                        : `${chatgptTokenConfigured ? t('status.configured') : t('status.missing')}${
+                            chatgptTokenConfigured && sourceText(status.chatgpt.token)
+                              ? ` · ${sourceText(status.chatgpt.token)}`
+                              : ''
+                          } · ${t('chatgpt.desc')}`,
                   ),
                   status.chatgpt.lastFailure
                     ? h(
@@ -914,7 +1229,7 @@ nav button:has(.dsh-mm-navGlyph)>svg{display:none}
                     ),
                     h(
                       'div',
-                      { className: 'dsh-mm-actions' },
+                      { className: 'dsh-mm-actions even' },
                       h(
                         'button',
                         {
@@ -956,17 +1271,20 @@ nav button:has(.dsh-mm-navGlyph)>svg{display:none}
                       'div',
                       { className: 'dsh-mm-fieldHead' },
                       h('span', { className: 'dsh-mm-fieldLabel' }, t('transport.label')),
-                      h(
-                        'span',
-                        { className: 'dsh-mm-tag' },
-                        status.chatgpt.transport === 'cdp' ? t('transport.cdp') : t('transport.node'),
-                      ),
                     ),
-                    h('p', { className: 'dsh-mm-hint' }, t('transport.desc')),
-                    h('p', { className: 'dsh-mm-hint' }, t('launch.hint')),
+                    h(
+                      'p',
+                      { className: 'dsh-mm-hint' },
+                      chatgptViaHeadless ? t('chatgpt.headlessDesc') : t('transport.desc'),
+                    ),
+                    h(
+                      'p',
+                      { className: 'dsh-mm-hint' },
+                      chatgptViaHeadless ? t('chatgpt.headlessHint') : t('launch.hint'),
+                    ),
                     h(
                       'div',
-                      { className: 'dsh-mm-actions' },
+                      { className: 'dsh-mm-actions even' },
                       h(
                         'button',
                         {
@@ -977,40 +1295,76 @@ nav button:has(.dsh-mm-navGlyph)>svg{display:none}
                         },
                         busy === 'launchChrome' ? t('launch.starting') : t('launch.action'),
                       ),
+                      h(
+                        'button',
+                        {
+                          className: 'dsh-mm-button',
+                          type: 'button',
+                          disabled: Boolean(busy),
+                          onClick: startChatgptHeadless,
+                        },
+                        busy === 'chatgptHeadless'
+                          ? t('deepseekLaunch.headlessStarting')
+                          : t('deepseekLaunch.headlessAction'),
+                      ),
                     ),
                     h(
                       'div',
-                      { className: 'dsh-mm-actions' },
+                      {
+                        className: 'dsh-mm-segmented',
+                        role: 'group',
+                        'aria-label': t('transport.label'),
+                      },
                       h(
                         'button',
                         {
-                          className: 'dsh-mm-link',
+                          className: 'dsh-mm-segment',
                           type: 'button',
-                          disabled: Boolean(busy) || status.chatgpt.transport !== 'cdp',
+                          'aria-pressed': !chatgptBrowserMode,
+                          disabled: Boolean(busy) || !chatgptBrowserMode,
                           onClick: () => setTransport('node'),
                         },
-                        t('transport.useNode'),
+                        t('transport.node'),
                       ),
                       h(
                         'button',
                         {
-                          className: 'dsh-mm-link',
+                          className: 'dsh-mm-segment',
                           type: 'button',
-                          disabled: Boolean(busy) || status.chatgpt.transport === 'cdp',
+                          'aria-pressed': chatgptViaCdp,
+                          disabled: Boolean(busy) || chatgptViaCdp,
                           onClick: () => setTransport('cdp'),
                         },
-                        t('transport.useCdp'),
+                        t('transport.cdp'),
+                      ),
+                      h(
+                        'button',
+                        {
+                          className: 'dsh-mm-segment',
+                          type: 'button',
+                          'aria-pressed': chatgptViaHeadless,
+                          disabled: Boolean(busy) || chatgptViaHeadless,
+                          onClick: () => setTransport('headless'),
+                        },
+                        t('transport.headless'),
                       ),
                     ),
-                    status.chatgpt.cdp && (chatgptViaCdp || chatgptCdpReady)
+                    chatgptViaHeadless && status.chatgpt.headless
                       ? h(
                           'p',
                           { className: 'dsh-mm-hint' },
-                          status.chatgpt.cdp.reachable
-                            ? `${t('transport.reachable')} · ${status.chatgpt.cdp.browser ?? 'Chromium'} · ${status.chatgpt.cdp.host}:${status.chatgpt.cdp.port}`
-                            : `${t('transport.unreachable')} (${status.chatgpt.cdp.host}:${status.chatgpt.cdp.port})`,
+                          `${chatgptHeadlessReady ? t('chatgpt.headlessReady') : t('chatgpt.headlessMissing')} · ` +
+                            `pid ${status.chatgpt.headless.pid ?? '?'} · ${status.chatgpt.headless.host}:${status.chatgpt.headless.port}`,
                         )
-                      : null,
+                      : status.chatgpt.cdp && (chatgptViaCdp || chatgptCdpReady)
+                        ? h(
+                            'p',
+                            { className: 'dsh-mm-hint' },
+                            status.chatgpt.cdp.reachable
+                              ? `${t('transport.reachable')} · ${status.chatgpt.cdp.browser ?? 'Chromium'} · ${status.chatgpt.cdp.host}:${status.chatgpt.cdp.port}`
+                              : `${t('transport.unreachable')} (${status.chatgpt.cdp.host}:${status.chatgpt.cdp.port})`,
+                          )
+                        : null,
                     h(
                       'details',
                       { className: 'dsh-mm-details' },
@@ -1132,7 +1486,7 @@ nav button:has(.dsh-mm-navGlyph)>svg{display:none}
                     ),
                     h(
                       'div',
-                      { className: 'dsh-mm-actions' },
+                      { className: 'dsh-mm-actions even' },
                       h(
                         'button',
                         {

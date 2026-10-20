@@ -20,6 +20,7 @@ import { buildTranscriptPrompt, deltaPrompt, parseDsmlToolCalls, StreamSieve } f
 import { sha3_512HexPrefix } from './sha3.js'
 import {
   CdpError,
+  COMPOSER_PROMPT_LIMIT,
   attachPage,
   composerInsert,
   composerNavigate,
@@ -146,11 +147,15 @@ function isHtmlBody(text) {
 
 function blockedPageError(status, transport) {
   const where =
-    transport === 'cdp'
-      ? 'Look at the Chrome window: if chatgpt.com itself shows a verification or "you have been blocked" page there, ' +
-        'the network/IP is being blocked — switch network (VPN/proxy exit) or wait for the block to lift.'
-      : 'Open chatgpt.com in your browser: if it shows a verification or block page there too, the network/IP is being ' +
-        'blocked rather than the credential being wrong.'
+    transport === 'headless'
+      ? 'The managed headless Chromium received that page, usually because its profile is not signed in or its cookies ' +
+        'are stale. Sign in from the local-Chrome transport once (the plugin can then copy the cookies), or paste fresh ' +
+        'chatgpt.com cookies including cf_clearance.'
+      : transport === 'cdp'
+        ? 'Look at the Chrome window: if chatgpt.com itself shows a verification or "you have been blocked" page there, ' +
+          'the network/IP is being blocked — switch network (VPN/proxy exit) or wait for the block to lift.'
+        : 'Open chatgpt.com in your browser: if it shows a verification or block page there too, the network/IP is being ' +
+          'blocked rather than the credential being wrong.'
   return new AdapterError(
     `ChatGPT Web answered HTTP ${status} with an HTML page instead of JSON, so an interstitial or block page answered ` +
       `instead of the API. ${where}`,
@@ -396,10 +401,12 @@ export class ChatGptWebClient {
     resolveCookies,
     logger,
     // 'node' sends the request with fetch; 'cdp' runs it inside the user's own
-    // Chrome page, which is the only way to satisfy Cloudflare's device check.
+    // Chrome page, which is the only way to satisfy Cloudflare's device check;
+    // 'headless' runs the same page in the managed, always-on headless Chromium.
     transport,
     cdpPort,
     cdpHost,
+    ensureHeadless,
   } = {}) {
     this.baseURL = String(baseURL || 'https://chatgpt.com').replace(/\/+$/, '')
     this.timeoutMs = Math.max(15000, Number(timeoutMs) || 300000)
@@ -431,17 +438,26 @@ export class ChatGptWebClient {
     // every turn would burn the whole CPU budget again for the same answer, so
     // the client backs off and fails fast until the cooldown expires.
     this.powBlockedUntil = 0
-    this.transport = transport === 'cdp' ? 'cdp' : 'node'
+    this.transport = transport === 'cdp' || transport === 'headless' ? transport : 'node'
+    this.ensureHeadless = ensureHeadless
     this.cdpPort = Number.isInteger(Number(cdpPort)) && Number(cdpPort) > 0 ? Number(cdpPort) : 9222
     this.cdpHost = typeof cdpHost === 'string' && cdpHost.trim() ? cdpHost.trim() : '127.0.0.1'
     this.cdpConnection = null
     this.cdpAttaching = null
     this.cdpTarget = null
+    // The headless profile keeps its login between turns; UA/cookies are seeded
+    // once per attached page, not on every request.
+    this.headlessSeeded = false
+  }
+
+  /** Both browser transports drive a real page; only they can pass Turnstile. */
+  usesCdp() {
+    return this.transport === 'cdp' || this.transport === 'headless'
   }
 
   /** Switch transport at runtime (the settings page does this). */
   setTransport(transport) {
-    const next = transport === 'cdp' ? 'cdp' : 'node'
+    const next = transport === 'cdp' || transport === 'headless' ? transport : 'node'
     if (next !== this.transport) {
       this.transport = next
       this.dropCdp()
@@ -457,14 +473,55 @@ export class ChatGptWebClient {
     }
     this.cdpConnection = null
     this.cdpTarget = null
+    this.headlessSeeded = false
+  }
+
+  /**
+   * The attached tab stopped answering CDP calls. That is not a network error
+   * and repeating the turn only repeats the wait, so report it as terminal with
+   * the recovery steps that actually work.
+   */
+  tabUnresponsive(cause) {
+    this.dropCdp()
+    const detail = cause?.message ? ` Last CDP error: ${cause.message}` : ''
+    return new AdapterError(
+      'ChatGPT Web page: the tab stopped responding to the browser debugger. This usually means the page is stuck ' +
+        'on an oversized draft or a failed send. Close that chatgpt.com tab (or quit and relaunch the debug Chrome) ' +
+        `and retry; the plugin now caps one prompt at ${COMPOSER_PROMPT_LIMIT} characters so it cannot recur.${detail}`,
+      'TAB_UNRESPONSIVE',
+    )
+  }
+
+  /**
+   * Attach to the page. In headless mode a refused connection is not the end:
+   * the managed Chromium may simply be stopped, so start it and attach once
+   * more (a Harness restart adopts the still-running instance).
+   */
+  async attachPageWithRetry() {
+    const options = {
+      host: this.cdpHost,
+      port: this.cdpPort,
+      origin: this.baseURL,
+      timeoutMs: this.transport === 'headless' ? 12000 : 5000,
+    }
+    try {
+      return await attachPage(options)
+    } catch (error) {
+      const startable = ['UNREACHABLE', 'NO_TARGET', 'CONNECT_FAILED', 'TIMEOUT'].includes(error?.code)
+      if (this.transport !== 'headless' || !this.ensureHeadless || !startable) throw error
+      this.logger?.warn?.(`my-model: headless Chromium unavailable (${error.code}); starting it and retrying`)
+      await this.ensureHeadless()
+      return attachPage(options)
+    }
   }
 
   /** Attach to a page on this origin, reusing the connection across calls. */
   async cdpPage() {
     if (this.cdpConnection) return this.cdpConnection
     if (!this.cdpAttaching) {
-      this.cdpAttaching = attachPage({ host: this.cdpHost, port: this.cdpPort, origin: this.baseURL })
-        .then(({ connection, target }) => {
+      this.cdpAttaching = this.attachPageWithRetry()
+        .then(async ({ connection, target }) => {
+          await this.prepareHeadlessPage(connection)
           this.cdpConnection = connection
           this.cdpTarget = target
           this.logger?.info?.(`my-model: attached to Chrome tab ${target.id ?? '?'} (${target.url ?? '?'})`)
@@ -475,6 +532,114 @@ export class ChatGptWebClient {
         })
     }
     return this.cdpAttaching
+  }
+
+  /**
+   * Put the managed headless tab into the same state as the visible Chrome one:
+   * the same User-Agent (Cloudflare's cf_clearance is bound to it), the stored
+   * chatgpt.com cookies, and a document loaded after both. Headless Chrome
+   * sends `HeadlessChrome/…`, which by itself is enough to fail the clearance.
+   */
+  async prepareHeadlessPage(page) {
+    if (this.transport !== 'headless' || this.headlessSeeded) return
+    this.headlessSeeded = true
+    // The headless profile starts empty; seed the jar from the saved cookie
+    // blob before copying it into the page.
+    await Promise.resolve()
+      .then(() => this.prepareCookies())
+      .catch(() => {})
+    try {
+      await page.send('Network.enable', {}, 3000)
+    } catch {
+      // setCookie below may still work.
+    }
+    try {
+      await page.send(
+        'Network.setUserAgentOverride',
+        { userAgent: this.userAgent, acceptLanguage: this.acceptLanguage },
+        3000,
+      )
+    } catch (error) {
+      this.logger?.warn?.(
+        `my-model: could not align the headless User-Agent (${error?.message ?? String(error)}); ` +
+          'Cloudflare may challenge the page',
+      )
+    }
+    // A headless target has no window focus, and the composer's paste/typing
+    // path only works when the page believes it is focused.
+    try {
+      await page.send('Emulation.setFocusEmulationEnabled', { enabled: true }, 3000)
+    } catch {
+      // Focus emulation is a best-effort improvement.
+    }
+    try {
+      await page.send('Page.bringToFront', {}, 3000)
+    } catch {
+      // The tab is already the only one in the managed browser.
+    }
+    let seeded = 0
+    for (const [name, value] of this.jar.values) {
+      try {
+        await page.send(
+          'Network.setCookie',
+          {
+            name,
+            value,
+            url: `${this.baseURL}/`,
+            path: '/',
+            secure: true,
+            httpOnly: true,
+            sameSite: 'None',
+          },
+          3000,
+        )
+        seeded += 1
+      } catch {
+        // A cookie the page rejects is not worth failing the turn over.
+      }
+    }
+    this.logger?.debug?.(`my-model: headless Chromium seeded with ${seeded} ChatGPT cookie(s)`)
+    try {
+      await page.send('Page.navigate', { url: `${this.baseURL}/` }, 5000)
+    } catch {
+      // The wait below reports whether the document is usable.
+    }
+    const ready = await this.waitForOrigin(page)
+    if (!ready) {
+      this.logger?.warn?.('my-model: the headless ChatGPT page did not finish loading; the next request may fail')
+    }
+  }
+
+  /** Wait until the page has committed this origin and finished loading. */
+  async waitForOrigin(page, timeoutMs = this.transport === 'headless' ? 30000 : 15000) {
+    const wanted = (() => {
+      try {
+        return new URL(this.baseURL).origin
+      } catch {
+        return this.baseURL
+      }
+    })()
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      try {
+        const result = await page.send(
+          'Runtime.evaluate',
+          { expression: '({ origin: location.origin, ready: document.readyState })', returnByValue: true },
+          3000,
+        )
+        const value = result?.result?.value
+        if (value?.origin === wanted && value?.ready === 'complete') {
+          // Give the app one tick to install its fetch/route handlers before a
+          // request is evaluated in the page.
+          await new Promise((resolve) => setTimeout(resolve, 500))
+          return true
+        }
+      } catch {
+        // The execution context disappears while the document navigates.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400))
+    }
+    return false
   }
 
   /** The pasted token, if any (no exchange involved). */
@@ -514,7 +679,7 @@ export class ChatGptWebClient {
    */
   async currentToken({ force = false } = {}) {
     await this.prepareCookies()
-    const direct = this.transport === 'cdp' ? '' : await this.resolveDirectToken()
+    const direct = this.usesCdp() ? '' : await this.resolveDirectToken()
     if (direct) return direct
     if (!force && this.accessToken && Date.now() - this.accessTokenAt < ACCESS_TOKEN_TTL_MS) {
       return this.accessToken
@@ -523,10 +688,14 @@ export class ChatGptWebClient {
     const token = normalizeAccessToken(session?.accessToken)
     if (!token) {
       throw new AdapterError(
-        this.transport === 'cdp'
-          ? 'No ChatGPT session: the attached Chrome tab is not signed in. Open chatgpt.com in that window, sign in, and retry.'
-          : 'No ChatGPT web credential is configured (or the cookies are no longer signed in). Open Settings → My Model → ' +
-            'ChatGPT and paste the `accessToken` from chatgpt.com/api/auth/session, or a fresh cookie string.',
+        this.transport === 'headless'
+          ? 'The managed headless Chromium is not signed in to chatgpt.com. Paste a fresh cookie string ' +
+            '(including cf_clearance) in Settings → My Model → ChatGPT, or use the local-Chrome transport once so ' +
+            'the launcher can copy the cookies.'
+          : this.transport === 'cdp'
+            ? 'No ChatGPT session: the attached Chrome tab is not signed in. Open chatgpt.com in that window, sign in, and retry.'
+            : 'No ChatGPT web credential is configured (or the cookies are no longer signed in). Open Settings → My Model → ' +
+              'ChatGPT and paste the `accessToken` from chatgpt.com/api/auth/session, or a fresh cookie string.',
         'MISSING_CREDENTIAL',
       )
     }
@@ -617,7 +786,7 @@ export class ChatGptWebClient {
 
   /** `GET /api/auth/session` — the web app's own "who am I / what token" call. */
   async sessionInfo({ signal } = {}) {
-    if (this.transport === 'cdp') {
+    if (this.usesCdp()) {
       const result = await this.cdpJson(SESSION_PATH, { method: 'GET', signal })
       if (result.status < 200 || result.status >= 300) throw this.httpError(responseLike(result.status), result.text)
       let json
@@ -718,7 +887,7 @@ export class ChatGptWebClient {
   }
 
   async requirementsCall(body, signal) {
-    if (this.transport === 'cdp') {
+    if (this.usesCdp()) {
       // The backend identifies the caller by this header, not by the tab's
       // cookies: without it the sentinel answers `persona: "chatgpt-noauth"` and
       // the conversation call is rejected later.
@@ -754,7 +923,7 @@ export class ChatGptWebClient {
   /** Verify the credential and the sentinel path without sending a chat message. */
   async testAuth() {
     const started = Date.now()
-    const direct = this.transport === 'cdp' ? '' : await this.resolveDirectToken()
+    const direct = this.usesCdp() ? '' : await this.resolveDirectToken()
     let session = {}
     if (direct) {
       // A pasted accessToken needs no exchange; the cookie blob may be absent.
@@ -765,9 +934,13 @@ export class ChatGptWebClient {
       const token = normalizeAccessToken(session?.accessToken)
       if (!token) {
         throw new AdapterError(
-          this.transport === 'cdp'
-            ? 'The Chrome tab is not signed in to chatgpt.com. Sign in there and retry — in CDP mode nothing has to be pasted here.'
-            : 'The cookies are not signed in to chatgpt.com. Log in again and paste a fresh cookie string or accessToken.',
+          this.transport === 'headless'
+            ? 'The managed headless Chromium is not signed in to chatgpt.com. Paste fresh cookies (including ' +
+              'cf_clearance), or sign in through the local-Chrome transport and launch headless again so the ' +
+              'cookies are copied.'
+            : this.transport === 'cdp'
+              ? 'The Chrome tab is not signed in to chatgpt.com. Sign in there and retry — in CDP mode nothing has to be pasted here.'
+              : 'The cookies are not signed in to chatgpt.com. Log in again and paste a fresh cookie string or accessToken.',
           'INVALID_CREDENTIAL',
         )
       }
@@ -845,12 +1018,12 @@ export class ChatGptWebClient {
     // A Turnstile proof can only be produced by the site's own JavaScript while
     // it sends a message, so the API replay cannot pass that gate. Over CDP the
     // page itself can: drive its composer and read the reply back.
-    const viaComposer = turnstileRequired && this.transport === 'cdp'
+    const viaComposer = turnstileRequired && this.usesCdp()
     if (turnstileRequired && !viaComposer) {
       throw new AdapterError(
         'ChatGPT Web requires a Turnstile proof for this account, and only the site’s own JavaScript can produce one. ' +
-          'Switch the ChatGPT transport to local Chrome (Settings → My Model → ChatGPT), or use the official OpenAI ' +
-          'API for this account.',
+          'Switch the ChatGPT transport to local Chrome or the managed headless Chromium (Settings → My Model → ' +
+          'ChatGPT), or use the official OpenAI API for this account.',
         'CHALLENGE_REQUIRED',
       )
     }
@@ -889,7 +1062,7 @@ export class ChatGptWebClient {
     if (conversationId) body.conversation_id = conversationId
 
     const response =
-      viaComposer || this.transport === 'cdp'
+      viaComposer || this.usesCdp()
         ? null
         : await this.request(CONVERSATION_PATH, {
             method: 'POST',
@@ -1077,15 +1250,45 @@ export class ChatGptWebClient {
           throw cdpErrorToAdapter(error)
         }
       }
+      const composerPrompt = String(prompt ?? '')
+      // A composer turn is one paste. The page keeps that text as a draft, so a
+      // prompt that is too big does not just fail — it comes back on every
+      // reload and eventually makes the tab stop answering CDP calls.
+      if (composerPrompt.length > COMPOSER_PROMPT_LIMIT) {
+        throw new AdapterError(
+          `ChatGPT Web cannot send a ${composerPrompt.length}-character prompt: the page composer is capped at ` +
+            `${COMPOSER_PROMPT_LIMIT} characters, and a larger paste wedges the tab. Start a new session and send a ` +
+            'shorter request.',
+          'PROMPT_TOO_LONG',
+        )
+      }
       // 0) Start from a fresh chat so the turn never lands in a conversation the
       // user is looking at.
-      await run(() => composerNavigate(page, this.baseURL))
+      try {
+        await run(() => composerNavigate(page, this.baseURL))
+      } catch (error) {
+        throw this.tabUnresponsive(error)
+      }
       let ready = null
       let onFreshChat = false
-      for (let attempt = 0; attempt < 40; attempt += 1) {
+      let probeFailures = 0
+      // A cold headless page loads far slower than the visible browser (the
+      // first turn may have to start Chromium and load the app from scratch).
+      const probeAttempts = this.transport === 'headless' ? 90 : 40
+      for (let attempt = 0; attempt < probeAttempts; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 500))
         if (signal?.aborted) throw new AdapterError('ChatGPT Web request aborted', 'ABORTED')
-        ready = await run(() => composerProbe(page))
+        try {
+          ready = await run(() => composerProbe(page))
+          probeFailures = 0
+        } catch (error) {
+          // One navigation-related failure is normal; three in a row means the
+          // renderer is gone (usually a wedged oversized draft). Stop instead of
+          // hanging the turn for minutes.
+          probeFailures += 1
+          if (probeFailures >= 3) throw this.tabUnresponsive(error)
+          continue
+        }
         // The old document keeps its composer while a navigation commits, so
         // "composer present" alone would type the prompt into the conversation
         // the plugin is leaving. A conversation URL means the new chat has not
@@ -1095,27 +1298,50 @@ export class ChatGptWebClient {
       }
       if (!ready?.ready || !onFreshChat) {
         throw new AdapterError(
-          `ChatGPT Web page: a fresh composer did not load within 20s (at ${ready?.href ?? 'an unknown URL'}). ` +
+          `ChatGPT Web page: a fresh composer did not load within ` +
+            `${Math.round((probeAttempts * 500) / 1000)}s (at ${ready?.href ?? 'an unknown URL'}). ` +
             'Is the tab signed in to chatgpt.com?',
           'UPSTREAM',
         )
       }
-      // 1) Insert the text (fast, synchronous in-page call).
-      const prepared = await run(() => composerInsert(page, { prompt: String(prompt ?? '') }))
-      if (!prepared?.ok) {
-        throw new AdapterError(`ChatGPT Web page: ${prepared?.message ?? 'the prompt could not be entered.'}`, 'UPSTREAM')
+      if (Number(ready?.draft) > COMPOSER_PROMPT_LIMIT) {
+        this.logger?.warn?.(
+          `my-model: the ChatGPT tab restored a ${ready.draft}-character draft; the next insert replaces it`,
+        )
       }
-      // 2) Click send once the button renders (React re-renders it into place).
+      // 1) Insert the text. `composerInsert` clears whatever is in the editor
+      // first, so drafts never accumulate across turns.
+      const prepared = await run(() => composerInsert(page, { prompt: composerPrompt }))
+      if (!prepared?.ok) {
+        const code = prepared?.code === 'PROMPT_TOO_LONG' ? 'PROMPT_TOO_LONG' : 'UPSTREAM'
+        throw new AdapterError(`ChatGPT Web page: ${prepared?.message ?? 'the prompt could not be entered.'}`, code)
+      }
+      // 2) Click send once the button renders, and confirm the click submitted by
+      // watching the editor empty. A click that React has not wired up yet
+      // leaves the text in place, which used to look like "the page never answers".
       let clicked = false
-      for (let attempt = 0; attempt < 10 && !clicked; attempt += 1) {
+      let submitted = false
+      let lastSend = null
+      for (let attempt = 0; attempt < 10 && !submitted; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 250))
         if (signal?.aborted) throw new AdapterError('ChatGPT Web request aborted', 'ABORTED')
-        const sent = await run(() => composerSend(page))
-        clicked = sent.clicked === true
+        lastSend = await run(() => composerSend(page))
+        if (lastSend?.clicked !== true) continue
+        clicked = true
+        await new Promise((resolve) => setTimeout(resolve, 600))
+        const after = await run(() => composerProbe(page))
+        submitted = !(Number(after?.draft) > 2)
       }
       if (!clicked) {
         throw new AdapterError(
           'ChatGPT Web page: the send button never appeared. Is the tab on a chat and not showing an error?',
+          'UPSTREAM',
+        )
+      }
+      if (!submitted) {
+        throw new AdapterError(
+          'ChatGPT Web page: the send button was clicked but the composer still holds the message. ' +
+            'Click send once in that Chrome tab and retry from the Harness.',
           'UPSTREAM',
         )
       }
@@ -1125,12 +1351,21 @@ export class ChatGptWebClient {
       let stable = 0
       let sawText = false
       let lastRead = null
+      let readFailures = 0
       const startedAt = Date.now()
       const deadline = startedAt + 180000
       while (Date.now() < deadline) {
         if (signal?.aborted) throw new AdapterError('ChatGPT Web request aborted', 'ABORTED')
         await new Promise((resolve) => setTimeout(resolve, 700))
-        const read = await run(() => composerRead(page, prepared.before))
+        let read
+        try {
+          read = await run(() => composerRead(page, prepared.before))
+          readFailures = 0
+        } catch (error) {
+          readFailures += 1
+          if (readFailures >= 3) throw this.tabUnresponsive(error)
+          continue
+        }
         lastRead = read
         const text = String(read?.text ?? '')
         if (text && !sawText) {
@@ -1173,7 +1408,7 @@ export class ChatGptWebClient {
       }
       return
     }
-    if (this.transport === 'cdp') {
+    if (this.usesCdp()) {
       const page = await this.cdpPage().catch((error) => {
         throw cdpErrorToAdapter(error)
       })
@@ -1334,6 +1569,10 @@ export class ChatGptWebAdapter {
     secChUaMobile,
     acceptLanguage,
     oaiLanguage,
+    transport,
+    cdpPort,
+    cdpHost,
+    ensureHeadless,
     maxPromptChars,
     maxToolChars,
     logger,
@@ -1358,12 +1597,19 @@ export class ChatGptWebAdapter {
       secChUaMobile,
       acceptLanguage,
       oaiLanguage,
+      transport,
+      cdpPort,
+      cdpHost,
+      ensureHeadless,
       resolveToken,
       resolveCookies,
       logger,
     })
     this.modelSlug = typeof modelSlug === 'string' && modelSlug.trim() ? modelSlug.trim() : DEFAULT_MODEL_SLUG
-    this.maxPromptChars = Math.max(20000, Number(maxPromptChars) || 400_000)
+    // A web chat turn is a single paste into the page composer, and an
+    // oversized paste is what used to wedge the tab. Keep the transcript well
+    // under the page limit no matter what the profile config asks for.
+    this.maxPromptChars = Math.max(8000, Math.min(Number(maxPromptChars) || 60_000, COMPOSER_PROMPT_LIMIT))
     this.maxToolChars = Math.max(500, Number(maxToolChars) || 8000)
     this.logger = logger
     this.sessions = new Map()
